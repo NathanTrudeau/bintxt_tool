@@ -10,9 +10,10 @@ Built for teams that need to **read, edit, diff, and version-control binary conf
 
 ```
 bintxt_tool/
-  input/               ← drop your .bin or .txt files here
-  output/              ← converted files land here
-  convert_inputs.sh    ← the script
+  input/                  ← drop your .bin or .txt files here
+  output/                 ← converted files + conversion report land here
+  convert_inputs.sh       ← the script
+  config.sh               ← edit word size, byte order, folder paths
   README.md
   .gitignore
 ```
@@ -26,15 +27,17 @@ bintxt_tool/
 git clone https://github.com/NathanTrudeau/bintxt_tool.git
 cd bintxt_tool
 
-# 2. Drop your files into input/
+# 2. (Optional) Edit config.sh to match your binary format
+
+# 3. Drop your files into input/
 #    .bin files → converted to .txt
 #    .txt files → converted back to .bin
 
-# 3. Run the script
+# 4. Run the script
 ./convert_inputs.sh
 ```
 
-Outputs land in `output/` with `.sha256` sidecar files.
+Converted files land in `output/` along with a timestamped conversion report.
 
 ---
 
@@ -65,28 +68,62 @@ This format is easy to diff, grep, and edit in any text editor.
 
 ---
 
-## Byte Order
+## Configuration
 
-Default: **little-endian** (x86, ARM LE — most modern hardware).
+Edit `config.sh` before running — no command-line flags needed:
 
-For big-endian targets:
-```bash
-./convert_inputs.sh --endian big
-```
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ENDIAN` | `little` | Byte order: `little` (x86/ARM) or `big` (MIPS/PowerPC) |
+| `WORD_SIZE` | `4` | Bytes per address entry: `1`, `2`, `4`, or `8` |
+| `INPUT_DIR` | `input` | Folder to scan for files |
+| `OUTPUT_DIR` | `output` | Folder for converted files |
+| `REPORT_DIR` | `output` | Folder for conversion reports |
 
 ---
 
-## Verification
+## Verification & Conversion Report
 
 Every conversion is verified via SHA-256 roundtrip:
 
-- **bin→txt**: the generated `.txt` is reconstructed back to `.bin` in memory and its SHA-256 is compared to the original. Match → ✓
+- **bin→txt**: the generated `.txt` is reconstructed back to `.bin` and its SHA-256 is compared to the original. Match → ✓
 - **txt→bin**: the generated `.bin` is converted back to `.txt` and diff'd against the original. Match → ✓
 
-SHA-256 hashes are saved as `.sha256` sidecar files in `output/` for later verification:
-```bash
-sha256sum -c output/myfile.bin.sha256
+After every run a `[YYYY-MM-DD_HHMMAP]_conversion_report.txt` is written to `output/`:
+
 ```
+============================================================
+  BINTXT_TOOL — CONVERSION REPORT
+  2026-04-04  03:15 AM
+============================================================
+
+  Config
+  ------
+  Word size : 4 byte(s)
+  Endian    : little
+
+  Summary
+  -------
+  Total     : 2
+  Passed    : 2
+  Failed    : 0
+  Status    : ALL PASSED
+
+============================================================
+  CONVERSIONS
+============================================================
+
+  [1]
+  File        : cfg-example.bin
+  Direction   : BIN → TXT
+  Input size  : 128 bytes
+  Output      : cfg-example.txt  (32 entries)
+  SHA-256 (A) : 3f8a92d1c4e7b051...
+  SHA-256 (B) : 3f8a92d1c4e7b051...
+  Roundtrip   : ✓  PASS
+```
+
+Errors are appended at the bottom of the report with full detail.
 
 ---
 

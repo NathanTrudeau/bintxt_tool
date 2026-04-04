@@ -2,4 +2,3 @@ input/*
 !input/.gitkeep
 output/*
 !output/.gitkeep
-*.sha256
