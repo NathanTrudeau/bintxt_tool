@@ -9,14 +9,13 @@
 #   .bin files → extracted to .txt  (EXTRACT)
 #   .txt files → validated against config, then converted to .bin  (APPLY)
 #
-# .txt files are always validated against WORD_SIZE and ENDIAN from config.sh
-# before conversion. Format issues are flagged in the apply report.
+# All files are validated against WORD_SIZES and ENDIAN from config.sh.
+# Format issues are flagged in the apply report; conversion still proceeds.
 #
-# For a review-before-commit workflow (DRAFT copies + y/N prompt),
+# For a review-before-commit workflow (DRAFT copies + deliberate apply),
 # use edit_inputs.sh instead.
 #
 # Outputs land in ./output/   Reports land in ./output/reports/
-# Edit config.sh to change word size, byte order, or folder paths.
 # Config is the source of truth — all files validated against it.
 # =============================================================================
 
@@ -30,10 +29,15 @@ if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
   source "$SCRIPT_DIR/config.sh"
 else
   ENDIAN="little"
-  WORD_SIZE=4
+  WORD_SIZES=(4)
   INPUT_DIR="input"
   OUTPUT_DIR="output"
   REPORT_DIR="output/reports"
+fi
+
+# Backward-compat: if old WORD_SIZE is set but WORD_SIZES is not
+if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
+  WORD_SIZES=("$WORD_SIZE")
 fi
 
 INPUT_DIR="$SCRIPT_DIR/$INPUT_DIR"
@@ -42,6 +46,15 @@ REPORT_DIR="$SCRIPT_DIR/$REPORT_DIR"
 TEMP_DIR="$(mktemp -d)"
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$REPORT_DIR"
+
+# Derived: row stride and human-readable layout label
+STRIDE=0
+LAYOUT_LABEL=""
+for ws in "${WORD_SIZES[@]}"; do
+  (( STRIDE += ws )) || true
+  LAYOUT_LABEL+="${ws}B+"
+done
+LAYOUT_LABEL="${LAYOUT_LABEL%+}"   # strip trailing +
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -65,9 +78,7 @@ APPLY_ERRORS=()
 
 check_deps() {
   local missing=()
-  for cmd in od python3; do
-    command -v "$cmd" &>/dev/null || missing+=("$cmd")
-  done
+  command -v python3 &>/dev/null || missing+=("python3")
   if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
     missing+=("sha256sum or shasum")
   fi
@@ -75,6 +86,17 @@ check_deps() {
     err "Missing required tools: ${missing[*]}"
     exit 1
   fi
+  # Validate WORD_SIZES
+  if [[ ${#WORD_SIZES[@]} -lt 1 || ${#WORD_SIZES[@]} -gt 6 ]]; then
+    err "WORD_SIZES must have 1–6 entries (got ${#WORD_SIZES[@]})"
+    exit 1
+  fi
+  for ws in "${WORD_SIZES[@]}"; do
+    if [[ "$ws" != "1" && "$ws" != "2" && "$ws" != "4" && "$ws" != "8" ]]; then
+      err "Invalid word size: $ws (must be 1, 2, 4, or 8)"
+      exit 1
+    fi
+  done
 }
 
 sha256() {
@@ -85,87 +107,108 @@ sha256() {
   fi
 }
 
-# ─── BIN → TXT ───────────────────────────────────────────────────────────────
+# ─── BIN → TXT (Python, supports multi-word WORD_SIZES) ──────────────────────
 
 bin_to_txt() {
   local src="$1" dst="$2"
-  od -tx${WORD_SIZE} -Ax -v -w${WORD_SIZE} "$src" > "$dst"
+  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
+import sys
+
+src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
+word_sizes = [int(x) for x in sys.argv[4:]]
+stride = sum(word_sizes)
+
+with open(src, 'rb') as f:
+    data = f.read()
+
+lines = []
+offset = 0
+
+while offset < len(data):
+    remaining = len(data) - offset
+    parts = [f"{offset:08x}"]
+    cur = offset
+    for ws in word_sizes:
+        chunk = data[cur:cur+ws] if cur + ws <= len(data) else \
+                data[cur:] + b'\x00' * (ws - max(0, len(data) - cur))
+        val = int.from_bytes(chunk[:ws], byteorder=endian)
+        parts.append(f"{val:0{ws*2}x}")
+        cur += ws
+    lines.append(" ".join(parts))
+    offset += stride
+
+lines.append(f"{offset:08x}")  # final address marker
+
+with open(dst, 'w') as f:
+    f.write('\n'.join(lines) + '\n')
+PYEOF
 }
+
+# ─── TXT → BIN (Python, supports multi-word WORD_SIZES) ──────────────────────
 
 txt_to_bin() {
   local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$ENDIAN" "$WORD_SIZE" <<'PYEOF'
-import sys, struct
+  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
+import sys
 
-src, dst, endian, word_size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
+word_sizes = [int(x) for x in sys.argv[4:]]
+n_words = len(word_sizes)
+stride  = sum(word_sizes)
 
-fmt_map = {1: ('B','B'), 2: ('<H','>H'), 4: ('<I','>I'), 8: ('<Q','>Q')}
-if word_size not in fmt_map:
-    print(f"ERROR: unsupported WORD_SIZE {word_size}", file=sys.stderr)
-    sys.exit(1)
-
-le_fmt, be_fmt = fmt_map[word_size]
-fmt = le_fmt if endian == 'little' else be_fmt
-if word_size == 1:
-    fmt = 'B'
+valid = {1, 2, 4, 8}
+for ws in word_sizes:
+    if ws not in valid:
+        print(f"ERROR: invalid word size {ws} (must be 1, 2, 4, or 8)", file=sys.stderr)
+        sys.exit(1)
 
 entries = []
 with open(src) as f:
     for line in f:
         parts = line.strip().split()
         if len(parts) < 2:
-            continue
+            continue  # address-only line or blank
         try:
             addr = int(parts[0], 16)
-            val  = int(parts[1], 16)
-            entries.append((addr, val))
+            vals = [int(v, 16) for v in parts[1:n_words + 1]]
         except ValueError:
             continue
+        if len(vals) < n_words:
+            continue  # incomplete row
+        entries.append((addr, vals))
 
 if not entries:
-    print("ERROR: no valid address/value pairs found", file=sys.stderr)
+    print("ERROR: no valid rows found", file=sys.stderr)
     sys.exit(1)
 
-max_addr  = max(addr for addr, _ in entries)
-file_size = max_addr + word_size
+last_addr = entries[-1][0]
+file_size = last_addr + stride
 buf = bytearray(file_size)
-for addr, val in entries:
-    buf[addr:addr+word_size] = struct.pack(fmt, val)
+
+for addr, vals in entries:
+    cur = addr
+    for val, ws in zip(vals, word_sizes):
+        buf[cur:cur+ws] = val.to_bytes(ws, byteorder=endian)
+        cur += ws
 
 with open(dst, 'wb') as f:
     f.write(buf)
 PYEOF
 }
 
-# ─── Verification ────────────────────────────────────────────────────────────
-
-verify_bin_to_txt() {
-  local orig_bin="$1" gen_txt="$2"
-  local temp_bin="$TEMP_DIR/rt_$(basename "$orig_bin")"
-
-  txt_to_bin "$gen_txt" "$temp_bin" 2>/dev/null || { echo "ROUNDTRIP_FAILED"; return 1; }
-
-  local orig_hash rt_hash
-  orig_hash=$(sha256 "$orig_bin")
-  rt_hash=$(sha256 "$temp_bin")
-  echo "$orig_hash $rt_hash"
-  [[ "$orig_hash" == "$rt_hash" ]]
-}
-
 # ─── TXT format validation against config ────────────────────────────────────
 
 validate_txt_format() {
   local src="$1"
-  local expected_val_len=$(( WORD_SIZE * 2 ))
-
-  python3 - "$src" "$WORD_SIZE" "$expected_val_len" <<'PYEOF'
+  python3 - "$src" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
 import sys
 
-src       = sys.argv[1]
-word_size = int(sys.argv[2])
-val_len   = int(sys.argv[3])
-issues    = []
-line_num  = 0
+src        = sys.argv[1]
+endian     = sys.argv[2]
+word_sizes = [int(x) for x in sys.argv[3:]]
+n_words    = len(word_sizes)
+issues     = []
+line_num   = 0
 
 with open(src) as f:
     for raw in f:
@@ -179,23 +222,34 @@ with open(src) as f:
         if len(parts) < 2:
             issues.append(f"line {line_num}: unparseable — '{line[:60]}'")
             continue
+
         try:
             addr = int(parts[0], 16)
         except ValueError:
             issues.append(f"line {line_num}: bad address '{parts[0]}'")
             continue
-        if addr % word_size != 0:
-            issues.append(f"line {line_num}: address 0x{addr:x} not aligned to WORD_SIZE={word_size}")
-        try:
-            val = int(parts[1], 16)
-        except ValueError:
-            issues.append(f"line {line_num}: bad value '{parts[1]}'")
+
+        stride = sum(word_sizes)
+        if addr % stride != 0:
+            issues.append(f"line {line_num}: address 0x{addr:x} not aligned to stride={stride}")
+
+        val_parts = parts[1:]
+        if len(val_parts) != n_words:
+            issues.append(f"line {line_num}: expected {n_words} value column(s), got {len(val_parts)}")
             continue
-        max_val = (1 << (word_size * 8)) - 1
-        if val > max_val:
-            issues.append(f"line {line_num}: value 0x{val:x} overflows WORD_SIZE={word_size} bytes")
-        if len(parts[1]) != val_len:
-            issues.append(f"line {line_num}: value width {len(parts[1])} chars (expected {val_len} for WORD_SIZE={word_size})")
+
+        for i, (vp, ws) in enumerate(zip(val_parts, word_sizes)):
+            expected_len = ws * 2
+            try:
+                val = int(vp, 16)
+            except ValueError:
+                issues.append(f"line {line_num}: word {i+1}: bad hex '{vp}'")
+                continue
+            max_val = (1 << (ws * 8)) - 1
+            if val > max_val:
+                issues.append(f"line {line_num}: word {i+1}: value 0x{val:x} overflows {ws}-byte field")
+            if len(vp) != expected_len:
+                issues.append(f"line {line_num}: word {i+1}: width {len(vp)} chars (expected {expected_len} for {ws}B)")
 
 if issues:
     print("ISSUES\n" + "\n".join(issues))
@@ -204,16 +258,16 @@ else:
 PYEOF
 }
 
-# ─── Write config-normalized txt ─────────────────────────────────────────────
+# ─── Normalize TXT to canonical config format ─────────────────────────────────
 
 normalize_txt() {
   local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$WORD_SIZE" <<'PYEOF'
+  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
 import sys
 
-src, dst, word_size = sys.argv[1], sys.argv[2], int(sys.argv[3])
-val_len  = word_size * 2
-addr_len = 8
+src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
+word_sizes = [int(x) for x in sys.argv[4:]]
+n_words = len(word_sizes)
 lines_out = []
 
 with open(src) as f:
@@ -224,13 +278,18 @@ with open(src) as f:
         parts = line.split()
         if len(parts) == 1:
             try:
-                lines_out.append(f"{int(parts[0], 16):0{addr_len}x}")
+                lines_out.append(f"{int(parts[0], 16):08x}")
             except ValueError:
                 lines_out.append(line)
             continue
-        if len(parts) >= 2:
+        if len(parts) >= n_words + 1:
             try:
-                lines_out.append(f"{int(parts[0], 16):0{addr_len}x} {int(parts[1], 16):0{val_len}x}")
+                addr = int(parts[0], 16)
+                row = [f"{addr:08x}"]
+                for i, ws in enumerate(word_sizes):
+                    val = int(parts[i+1], 16) if i+1 < len(parts) else 0
+                    row.append(f"{val:0{ws*2}x}")
+                lines_out.append(" ".join(row))
                 continue
             except ValueError:
                 pass
@@ -257,7 +316,20 @@ verify_bin_to_txt() {
 }
 
 normalize_for_compare() {
-  sed 's/[[:space:]]*$//' "$1" | tr '[:upper:]' '[:lower:]' | grep -v '^[[:space:]]*$'
+  # Lowercase, strip trailing whitespace, skip blanks, pad addresses to 8 hex digits
+  python3 - "$1" <<'PYNORM'
+import sys
+for raw in open(sys.argv[1]):
+    line = raw.strip().lower()
+    if not line:
+        continue
+    parts = line.split()
+    try:
+        parts[0] = f"{int(parts[0], 16):08x}"
+    except (ValueError, IndexError):
+        pass
+    print(" ".join(parts))
+PYNORM
 }
 
 verify_txt_to_bin() {
@@ -300,7 +372,7 @@ format_entry() {
   }
 }
 
-# ─── EXTRACT: process a single .bin file ─────────────────────────────────────
+# ─── EXTRACT: .bin → .txt ────────────────────────────────────────────────────
 
 extract_file() {
   local src="$1"
@@ -315,8 +387,8 @@ extract_file() {
 
   bin_to_txt "$src" "$dst"
 
-  local entries; entries=$(grep -c ' ' "$dst" 2>/dev/null || echo 0)
-  output_info="${base}.txt  (${entries} address entries)"
+  local rows; rows=$(grep -c ' ' "$dst" 2>/dev/null || echo 0)
+  output_info="${base}.txt  (${rows} rows, layout: ${LAYOUT_LABEL})"
   log "         → $output_info"
 
   local verify_out
@@ -334,7 +406,7 @@ extract_file() {
   [[ "$status" == "PASS" ]]
 }
 
-# ─── APPLY: process a single .txt file ───────────────────────────────────────
+# ─── APPLY: .txt → .bin ──────────────────────────────────────────────────────
 
 apply_file() {
   local src="$1"
@@ -346,11 +418,10 @@ apply_file() {
 
   log "${CYAN}APPLY${NC}    TXT→BIN  $filename"
 
-  # Validate format against config
   local fmt_result
   fmt_result=$(validate_txt_format "$src" 2>&1)
   if [[ "$fmt_result" == OK ]]; then
-    fmt_notes="Format matches config (WORD_SIZE=${WORD_SIZE}, ENDIAN=${ENDIAN})"
+    fmt_notes="Format matches config (WORD_SIZES=${WORD_SIZES[*]}, ENDIAN=${ENDIAN})"
     ok "Format valid"
   else
     local issue_lines; issue_lines=$(echo "$fmt_result" | tail -n +2)
@@ -362,9 +433,8 @@ apply_file() {
   input_size="$(wc -l < "$src") lines"
   hash_a=$(sha256 "$src")
 
-  # Write normalized canonical txt to output/
   normalize_txt "$src" "$norm_dst"
-  log "         → Normalized txt: $(basename "$norm_dst")"
+  log "         → Normalized: $(basename "$norm_dst")"
 
   local py_err
   if ! py_err=$(txt_to_bin "$src" "$dst" 2>&1); then
@@ -398,7 +468,7 @@ apply_file() {
 
 # ─── Write report ─────────────────────────────────────────────────────────────
 
-write_single_report() {
+write_report() {
   local label="$1" direction_label="$2"
   local -n _entries="$3"
   local -n _errors="$4"
@@ -428,7 +498,7 @@ write_single_report() {
     echo
     echo "  Configuration (source of truth)"
     echo "  --------------------------------"
-    echo "  Word size   : ${WORD_SIZE} byte(s)  ($(( WORD_SIZE * 8 ))-bit words)"
+    echo "  Word layout : ${LAYOUT_LABEL}  (${#WORD_SIZES[@]} word(s), ${STRIDE}B stride)"
     echo "  Byte order  : $ENDIAN-endian"
     echo "  Input dir   : $INPUT_DIR"
     echo "  Output dir  : $OUTPUT_DIR"
@@ -439,7 +509,7 @@ write_single_report() {
     echo "  Files total : $total"
     echo "  Passed      : $passed"
     echo "  Failed      : $failed"
-    echo "  Status      : $overall"
+    echo "  Status      : $([ $failed -gt 0 ] && echo "COMPLETED WITH ERRORS" || echo "ALL PASSED")"
     echo
     echo "============================================================"
     echo "  CONVERSIONS"
@@ -463,7 +533,7 @@ write_single_report() {
       done
     fi
     echo "============================================================"
-    echo "  END OF REPORT  —  bintxt_tool  (WORD_SIZE=${WORD_SIZE}, ENDIAN=${ENDIAN})"
+    echo "  END OF REPORT  —  bintxt_tool  (${LAYOUT_LABEL}, ENDIAN=${ENDIAN})"
     echo "============================================================"
   } > "$report_file"
 
@@ -475,7 +545,7 @@ write_single_report() {
 main() {
   check_deps
 
-  echo -e "\n${BOLD}${BLUE}bintxt_tool${NC}  (word: ${WORD_SIZE}B · endian: ${ENDIAN})"
+  echo -e "\n${BOLD}${BLUE}bintxt_tool${NC}  (layout: ${LAYOUT_LABEL} · endian: ${ENDIAN})"
   echo -e "  Input:   ${CYAN}$INPUT_DIR${NC}"
   echo -e "  Output:  ${CYAN}$OUTPUT_DIR${NC}"
   echo -e "  Reports: ${CYAN}$REPORT_DIR${NC}"
@@ -489,9 +559,7 @@ main() {
     esac
   done < <(find "$INPUT_DIR" -maxdepth 1 -type f \( -iname "*.bin" -o -iname "*.txt" \) -print0 | sort -z)
 
-  local total_files=$(( ${#bin_files[@]} + ${#txt_files[@]} ))
-
-  if [[ $total_files -eq 0 ]]; then
+  if [[ $(( ${#bin_files[@]} + ${#txt_files[@]} )) -eq 0 ]]; then
     warn "No .bin or .txt files found in input/"
     echo
     sleep 5
@@ -500,7 +568,7 @@ main() {
 
   local extract_pass=0 extract_fail=0 apply_pass=0 apply_fail=0
 
-  # ── EXTRACT: .bin → .txt ────────────────────────────────────────────────────
+  # ── EXTRACT ─────────────────────────────────────────────────────────────────
   if [[ ${#bin_files[@]} -gt 0 ]]; then
     header "EXTRACT — ${#bin_files[@]} binary file(s)…"
     for f in "${bin_files[@]}"; do
@@ -520,7 +588,7 @@ main() {
     done
   fi
 
-  # ── APPLY: .txt → .bin ──────────────────────────────────────────────────────
+  # ── APPLY ───────────────────────────────────────────────────────────────────
   if [[ ${#txt_files[@]} -gt 0 ]]; then
     header "APPLY — ${#txt_files[@]} text file(s)…"
     for f in "${txt_files[@]}"; do
@@ -533,37 +601,33 @@ main() {
     done
   fi
 
-  # ── Write reports ───────────────────────────────────────────────────────────
-  echo
-  header "Writing reports…"
-
+  # ── Reports ─────────────────────────────────────────────────────────────────
   local extract_total=$(( extract_pass + extract_fail ))
   local apply_total=$(( apply_pass + apply_fail ))
-
+  echo
+  header "Writing reports…"
   if [[ $extract_total -gt 0 ]]; then
     local rpt1
-    rpt1=$(write_single_report "extract" "BINARY → TEXT  [EXTRACT]" EXTRACT_ENTRIES EXTRACT_ERRORS "$extract_pass" "$extract_fail" "$extract_total")
+    rpt1=$(write_report "extract" "BINARY → TEXT  [EXTRACT]" EXTRACT_ENTRIES EXTRACT_ERRORS "$extract_pass" "$extract_fail" "$extract_total")
     ok "Extract report: ${CYAN}$(basename "$rpt1")${NC}"
   fi
   if [[ $apply_total -gt 0 ]]; then
     local rpt2
-    rpt2=$(write_single_report "apply" "TEXT → BINARY  [APPLY]" APPLY_ENTRIES APPLY_ERRORS "$apply_pass" "$apply_fail" "$apply_total")
+    rpt2=$(write_report "apply" "TEXT → BINARY  [APPLY]" APPLY_ENTRIES APPLY_ERRORS "$apply_pass" "$apply_fail" "$apply_total")
     ok "Apply report:   ${CYAN}$(basename "$rpt2")${NC}"
   fi
 
   # ── Summary ─────────────────────────────────────────────────────────────────
   local total_pass=$(( extract_pass + apply_pass ))
   local total_fail=$(( extract_fail + apply_fail ))
-  local grand_total=$(( total_pass + total_fail ))
-
   echo
   echo -e "${BOLD}─────────────────────────────────────${NC}"
-  echo -e "  ${GREEN}Passed: $total_pass${NC}  |  ${RED}Failed: $total_fail${NC}  |  Total: $grand_total"
+  echo -e "  ${GREEN}Passed: $total_pass${NC}  |  ${RED}Failed: $total_fail${NC}  |  Total: $(( total_pass + total_fail ))"
   echo -e "  Outputs in ${CYAN}output/${NC}"
   echo -e "${BOLD}─────────────────────────────────────${NC}"
 
   if [[ $total_fail -gt 0 ]]; then
-    echo -e "\n  ${RED}One or more conversions failed — see report(s) for details.${NC}"
+    echo -e "\n  ${RED}One or more conversions failed — see reports for details.${NC}"
   else
     echo -e "\n  ${GREEN}All conversions verified successfully.${NC}"
     if [[ ${#bin_files[@]} -gt 0 ]]; then
