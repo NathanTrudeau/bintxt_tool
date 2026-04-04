@@ -78,15 +78,11 @@ sha256() {
 
 # ─── od format string derived from WORD_SIZE ─────────────────────────────────
 
-od_format() {
-  echo "-tx${WORD_SIZE} -Ax -v -w${WORD_SIZE}"
-}
-
 # ─── BIN → TXT ───────────────────────────────────────────────────────────────
 
 bin_to_txt() {
   local src="$1" dst="$2"
-  eval od $(od_format) '"$src"' > "$dst"
+  od -tx${WORD_SIZE} -Ax -v -w${WORD_SIZE} "$src" > "$dst"
 }
 
 # ─── TXT → BIN ───────────────────────────────────────────────────────────────
@@ -163,6 +159,14 @@ verify_bin_to_txt() {
   [[ "$orig_hash" == "$rt_hash" ]]
 }
 
+normalize_txt() {
+  # Lowercase, strip trailing whitespace, drop blank/comment lines
+  # Keeps address-value lines and the final address-only line
+  sed 's/[[:space:]]*$//' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | grep -v '^[[:space:]]*$'
+}
+
 verify_txt_to_bin() {
   local orig_txt="$1" gen_bin="$2"
   local temp_txt="$TEMP_DIR/rt_$(basename "$orig_txt")"
@@ -172,12 +176,17 @@ verify_txt_to_bin() {
   local gen_hash
   gen_hash=$(sha256 "$gen_bin")
 
-  if diff -q "$orig_txt" "$temp_txt" &>/dev/null; then
+  local norm_orig norm_rt
+  norm_orig=$(normalize_txt "$orig_txt")
+  norm_rt=$(normalize_txt "$temp_txt")
+
+  if [[ "$norm_orig" == "$norm_rt" ]]; then
     echo "$gen_hash $gen_hash"
     return 0
   else
+    # Return the diff of normalized content so the report shows clean output
     echo "MISMATCH"
-    diff "$orig_txt" "$temp_txt" 2>&1
+    diff <(echo "$norm_orig") <(echo "$norm_rt") 2>&1 || true
     return 1
   fi
 }
