@@ -2,46 +2,55 @@
 # =============================================================================
 # convert_inputs.sh — Binary ↔ Text conversion tool
 #
-# Usage:  ./convert_inputs.sh [--endian little|big]
+# Usage:  ./convert_inputs.sh
 #
-# Drop .bin files into ./input/ to convert → text
-# Drop .txt files  into ./input/ to convert → binary
-#
-# Outputs land in ./output/ with SHA-256 sidecar files.
-# Requires: od, python3, sha256sum (or shasum on macOS)
+# Drop .bin or .txt files into ./input/ to convert.
+# Outputs land in ./output/  A conversion report is written to ./output/
+# Edit config.sh to change word size, byte order, or folder paths.
 # =============================================================================
 
 set -euo pipefail
 
-# ─── Config ──────────────────────────────────────────────────────────────────
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INPUT_DIR="$SCRIPT_DIR/input"
-OUTPUT_DIR="$SCRIPT_DIR/output"
+
+# ─── Load config ─────────────────────────────────────────────────────────────
+
+if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
+  source "$SCRIPT_DIR/config.sh"
+else
+  # Defaults if config.sh is missing
+  ENDIAN="little"
+  WORD_SIZE=4
+  INPUT_DIR="input"
+  OUTPUT_DIR="output"
+  REPORT_DIR="output"
+fi
+
+INPUT_DIR="$SCRIPT_DIR/$INPUT_DIR"
+OUTPUT_DIR="$SCRIPT_DIR/$OUTPUT_DIR"
+REPORT_DIR="$SCRIPT_DIR/$REPORT_DIR"
 TEMP_DIR="$(mktemp -d)"
 
-# Ensure folders exist (they should be committed, but just in case)
-mkdir -p "$INPUT_DIR" "$OUTPUT_DIR"
-
-# Byte order for 4-byte integer reconstruction (little = x86/ARM LE, big = MIPS/PowerPC)
-ENDIAN="little"
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --endian) ENDIAN="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; exit 1 ;;
-  esac
-done
+mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$REPORT_DIR"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-log()     { echo -e "  $*"; }
-ok()      { echo -e "  ${GREEN}✓${NC} $*"; }
-warn()    { echo -e "  ${YELLOW}⚠${NC}  $*"; }
-err()     { echo -e "  ${RED}✗${NC} $*"; }
-header()  { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
+log()    { echo -e "  $*"; }
+ok()     { echo -e "  ${GREEN}✓${NC} $*"; }
+warn()   { echo -e "  ${YELLOW}⚠${NC}  $*"; }
+err()    { echo -e "  ${RED}✗${NC} $*"; }
+header() { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
+
+# ─── Report helpers ──────────────────────────────────────────────────────────
+
+REPORT_ENTRIES=()   # collects per-file report blocks
+REPORT_ERRORS=()    # collects error detail lines
+
+report_add() { REPORT_ENTRIES+=("$1"); }
+report_err()  { REPORT_ERRORS+=("$1"); }
 
 # ─── Dependency check ────────────────────────────────────────────────────────
 
@@ -50,7 +59,6 @@ check_deps() {
   for cmd in od python3; do
     command -v "$cmd" &>/dev/null || missing+=("$cmd")
   done
-  # sha256sum (Linux) or shasum (macOS)
   if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
     missing+=("sha256sum or shasum")
   fi
@@ -61,119 +69,115 @@ check_deps() {
 }
 
 sha256() {
-  local file="$1"
   if command -v sha256sum &>/dev/null; then
-    sha256sum "$file" | awk '{print $1}'
+    sha256sum "$1" | awk '{print $1}'
   else
-    shasum -a 256 "$file" | awk '{print $1}'
+    shasum -a 256 "$1" | awk '{print $1}'
   fi
 }
 
-# ─── Dir check ───────────────────────────────────────────────────────────────
+# ─── od format string derived from WORD_SIZE ─────────────────────────────────
 
-setup_dirs() {
-  : # input/ and output/ are part of the repo — nothing to create
+od_format() {
+  echo "-tx${WORD_SIZE} -Ax -v -w${WORD_SIZE}"
 }
 
 # ─── BIN → TXT ───────────────────────────────────────────────────────────────
 
 bin_to_txt() {
-  local src="$1"
-  local dst="$2"
-  # od: hex addresses, 4-byte hex values, one per line, no elision
-  od -tx4 -Ax -v -w4 "$src" > "$dst"
+  local src="$1" dst="$2"
+  eval od $(od_format) '"$src"' > "$dst"
 }
 
 # ─── TXT → BIN ───────────────────────────────────────────────────────────────
-# Handles both full dumps and sparse/partial files.
-# Full dump:  all sequential addresses present → reconstruct entire binary
-# Partial:    only some addresses present → pad gaps with 0x00
 
 txt_to_bin() {
-  local src="$1"
-  local dst="$2"
-  python3 - "$src" "$dst" "$ENDIAN" <<'PYEOF'
-import sys
-import struct
+  local src="$1" dst="$2"
+  python3 - "$src" "$dst" "$ENDIAN" "$WORD_SIZE" <<'PYEOF'
+import sys, struct
 
-src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
-fmt = '<I' if endian == 'little' else '>I'
+src, dst, endian, word_size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+
+fmt_map = {
+    1: ('B', 'B'),
+    2: ('<H', '>H'),
+    4: ('<I', '>I'),
+    8: ('<Q', '>Q'),
+}
+if word_size not in fmt_map:
+    print(f"ERROR: unsupported WORD_SIZE {word_size} (must be 1, 2, 4, or 8)", file=sys.stderr)
+    sys.exit(1)
+
+le_fmt, be_fmt = fmt_map[word_size]
+fmt = le_fmt if endian == 'little' else be_fmt
+
+# For 1-byte words there's no endian ambiguity
+if word_size == 1:
+    fmt = 'B'
 
 entries = []
 with open(src) as f:
     for line in f:
         parts = line.strip().split()
         if len(parts) < 2:
-            continue  # final address-only line or blank
+            continue
         try:
             addr = int(parts[0], 16)
             val  = int(parts[1], 16)
             entries.append((addr, val))
         except ValueError:
-            continue  # skip malformed lines
+            continue
 
 if not entries:
-    print("ERROR: no valid address/value pairs found in text file", file=sys.stderr)
+    print("ERROR: no valid address/value pairs found", file=sys.stderr)
     sys.exit(1)
 
-max_addr = max(addr for addr, _ in entries)
-file_size = max_addr + 4  # last address + 4 bytes
+max_addr  = max(addr for addr, _ in entries)
+file_size = max_addr + word_size
 
-# Build output buffer (gaps filled with 0x00)
 buf = bytearray(file_size)
 for addr, val in entries:
-    packed = struct.pack(fmt, val)
-    buf[addr:addr+4] = packed
+    buf[addr:addr+word_size] = struct.pack(fmt, val)
 
 with open(dst, 'wb') as f:
     f.write(buf)
 PYEOF
 }
 
-# ─── Verification (roundtrip SHA-256) ────────────────────────────────────────
+# ─── Verification ────────────────────────────────────────────────────────────
 
 verify_bin_to_txt() {
-  local original_bin="$1"
-  local generated_txt="$2"
-  local temp_bin="$TEMP_DIR/roundtrip_$(basename "$original_bin")"
-
-  # Reconstruct binary from the generated text, compare SHA-256 to original
-  if ! txt_to_bin "$generated_txt" "$temp_bin" 2>/dev/null; then
-    err "Roundtrip reconstruction failed — cannot verify"
-    return 1
-  fi
-
+  local orig_bin="$1" gen_txt="$2"
+  local temp_bin="$TEMP_DIR/rt_$(basename "$orig_bin")"
   local orig_hash rt_hash
-  orig_hash=$(sha256 "$original_bin")
+
+  txt_to_bin "$gen_txt" "$temp_bin" 2>/dev/null || {
+    echo "ROUNDTRIP_FAILED"
+    return 1
+  }
+
+  orig_hash=$(sha256 "$orig_bin")
   rt_hash=$(sha256 "$temp_bin")
 
-  if [[ "$orig_hash" == "$rt_hash" ]]; then
-    ok "Verified  SHA-256: ${orig_hash:0:16}…"
-    return 0
-  else
-    err "Mismatch!"
-    log "  Original : $orig_hash"
-    log "  Roundtrip: $rt_hash"
-    return 1
-  fi
+  echo "$orig_hash $rt_hash"
+  [[ "$orig_hash" == "$rt_hash" ]]
 }
 
 verify_txt_to_bin() {
-  local original_txt="$1"
-  local generated_bin="$2"
-  local temp_txt="$TEMP_DIR/roundtrip_$(basename "$original_txt")"
+  local orig_txt="$1" gen_bin="$2"
+  local temp_txt="$TEMP_DIR/rt_$(basename "$orig_txt")"
 
-  # Reconstruct text from the generated binary, compare against original
-  bin_to_txt "$generated_bin" "$temp_txt"
+  bin_to_txt "$gen_bin" "$temp_txt"
 
-  if diff -q "$original_txt" "$temp_txt" &>/dev/null; then
-    local hash
-    hash=$(sha256 "$generated_bin")
-    ok "Verified  SHA-256: ${hash:0:16}…"
+  local gen_hash
+  gen_hash=$(sha256 "$gen_bin")
+
+  if diff -q "$orig_txt" "$temp_txt" &>/dev/null; then
+    echo "$gen_hash $gen_hash"
     return 0
   else
-    warn "Roundtrip text differs — check diff:"
-    diff "$original_txt" "$temp_txt" | head -20 | sed 's/^/      /'
+    echo "MISMATCH"
+    diff "$orig_txt" "$temp_txt" 2>&1
     return 1
   fi
 }
@@ -182,51 +186,79 @@ verify_txt_to_bin() {
 
 process_file() {
   local src="$1"
-  local filename ext base outfile result_icon
-
+  local filename ext base
   filename="$(basename "$src")"
   ext="${filename##*.}"
   base="${filename%.*}"
 
+  local direction input_size output_info hash_a hash_b status detail
+  status="PASS"
+  detail=""
+
   case "${ext,,}" in
     bin)
+      direction="BIN → TXT"
       local dst="$OUTPUT_DIR/${base}.txt"
-      log "${CYAN}BIN→TXT${NC}  $filename"
 
+      log "${CYAN}BIN→TXT${NC}  $filename"
+      input_size=$(wc -c < "$src")
       bin_to_txt "$src" "$dst"
 
-      local lines
-      lines=$(grep -c ' ' "$dst" 2>/dev/null || echo 0)
-      log "          → ${base}.txt  (${lines} address entries)"
+      local entries
+      entries=$(grep -c ' ' "$dst" 2>/dev/null || echo 0)
+      output_info="${base}.txt  (${entries} entries)"
+      log "          → $output_info"
 
-      if verify_bin_to_txt "$src" "$dst"; then
-        # Write SHA-256 sidecar
-        sha256 "$src" > "$OUTPUT_DIR/${base}.bin.sha256"
-        return 0
+      local verify_out
+      if verify_out=$(verify_bin_to_txt "$src" "$dst" 2>&1); then
+        read -r hash_a hash_b <<< "$verify_out"
+        ok "Verified  SHA-256: ${hash_a:0:20}…"
       else
-        return 1
+        status="FAIL"
+        hash_a="n/a"; hash_b="n/a"
+        detail="Roundtrip reconstruction mismatch. Output may be corrupt."
+        err "Verification failed"
+        report_err "[$filename] $detail"
       fi
       ;;
 
     txt)
+      direction="TXT → BIN"
       local dst="$OUTPUT_DIR/${base}.bin"
+
       log "${CYAN}TXT→BIN${NC}  $filename"
 
-      if ! txt_to_bin "$src" "$dst"; then
-        err "Conversion failed for $filename"
+      local py_err
+      if ! py_err=$(txt_to_bin "$src" "$dst" 2>&1); then
+        status="FAIL"
+        hash_a="n/a"; hash_b="n/a"
+        input_size=$(wc -l < "$src")
+        output_info="${base}.bin  (conversion failed)"
+        detail="$py_err"
+        err "Conversion failed: $py_err"
+        report_err "[$filename] $detail"
+
+        report_add "$(format_entry "$direction" "$filename" "$output_info" "${input_size} lines" "$hash_a" "$hash_b" "$status" "$detail")"
         return 1
       fi
 
+      input_size=$(wc -l < "$src")
       local bytes
       bytes=$(wc -c < "$dst")
-      log "          → ${base}.bin  (${bytes} bytes)"
+      output_info="${base}.bin  (${bytes} bytes)"
+      log "          → $output_info"
 
-      if verify_txt_to_bin "$src" "$dst"; then
-        # Write SHA-256 sidecar
-        sha256 "$dst" > "$OUTPUT_DIR/${base}.bin.sha256"
-        return 0
+      local verify_out
+      if verify_out=$(verify_txt_to_bin "$src" "$dst" 2>&1); then
+        read -r hash_a hash_b <<< "$verify_out"
+        ok "Verified  SHA-256: ${hash_a:0:20}…"
       else
-        return 1
+        status="FAIL"
+        hash_a="n/a"; hash_b="n/a"
+        detail="$(echo "$verify_out" | tail -10)"
+        err "Verification failed — roundtrip diff:"
+        echo "$detail" | head -5 | sed 's/^/      /'
+        report_err "[$filename] Roundtrip diff detected:"$'\n'"$detail"
       fi
       ;;
 
@@ -235,19 +267,106 @@ process_file() {
       return 0
       ;;
   esac
+
+  report_add "$(format_entry "$direction" "$filename" "$output_info" "${input_size} bytes" "$hash_a" "$hash_b" "$status" "$detail")"
+  [[ "$status" == "PASS" ]]
+}
+
+format_entry() {
+  local direction="$1" filename="$2" output="$3" size="$4"
+  local hash_a="$5" hash_b="$6" status="$7" detail="$8"
+  local icon="✓  PASS"
+  [[ "$status" == "FAIL" ]] && icon="✗  FAIL"
+
+  cat <<EOF
+  File        : $filename
+  Direction   : $direction
+  Input size  : $size
+  Output      : $output
+  SHA-256 (A) : $hash_a
+  SHA-256 (B) : $hash_b
+  Roundtrip   : $icon
+$([ -n "$detail" ] && echo "  Error       : $detail" || true)
+EOF
+}
+
+# ─── Write report ────────────────────────────────────────────────────────────
+
+write_report() {
+  local passed="$1" failed="$2" total="$3"
+  local dt_file dt_display
+
+  # Filename: YYYY-MM-DD_HHMM[AM|PM]
+  dt_file=$(date '+%Y-%m-%d_%I%M%p')
+  # Display: Month DD YYYY  HH:MM AM/PM
+  dt_display=$(date '+%Y-%m-%d  %I:%M %p')
+
+  local report_file="$REPORT_DIR/${dt_file}_conversion_report.txt"
+
+  local overall="ALL PASSED"
+  [[ $failed -gt 0 ]] && overall="COMPLETED WITH ERRORS"
+
+  {
+    echo "============================================================"
+    echo "  BINTXT_TOOL — CONVERSION REPORT"
+    echo "  $dt_display"
+    echo "============================================================"
+    echo
+    echo "  Config"
+    echo "  ------"
+    echo "  Word size : ${WORD_SIZE} byte(s)"
+    echo "  Endian    : $ENDIAN"
+    echo "  Input dir : $INPUT_DIR"
+    echo "  Output dir: $OUTPUT_DIR"
+    echo
+    echo "  Summary"
+    echo "  -------"
+    echo "  Total     : $total"
+    echo "  Passed    : $passed"
+    echo "  Failed    : $failed"
+    echo "  Status    : $overall"
+    echo
+    echo "============================================================"
+    echo "  CONVERSIONS"
+    echo "============================================================"
+    echo
+
+    local i=1
+    for entry in "${REPORT_ENTRIES[@]}"; do
+      echo "  [$i]"
+      echo "$entry"
+      echo
+      (( i++ ))
+    done
+
+    if [[ ${#REPORT_ERRORS[@]} -gt 0 ]]; then
+      echo "============================================================"
+      echo "  ERROR DETAILS"
+      echo "============================================================"
+      echo
+      for e in "${REPORT_ERRORS[@]}"; do
+        echo "$e"
+        echo
+      done
+    fi
+
+    echo "============================================================"
+    echo "  END OF REPORT"
+    echo "============================================================"
+  } > "$report_file"
+
+  echo "$report_file"
 }
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 main() {
   check_deps
-  setup_dirs
 
-  echo -e "\n${BOLD}${BLUE}bintxt_tool${NC}  (endian: ${ENDIAN})"
+  echo -e "\n${BOLD}${BLUE}bintxt_tool${NC}  (word: ${WORD_SIZE}B · endian: ${ENDIAN})"
   echo -e "  Input:  ${CYAN}$INPUT_DIR${NC}"
   echo -e "  Output: ${CYAN}$OUTPUT_DIR${NC}"
 
-  # Collect files
   local files=()
   while IFS= read -r -d '' f; do
     files+=("$f")
@@ -255,8 +374,6 @@ main() {
 
   if [[ ${#files[@]} -eq 0 ]]; then
     warn "No .bin or .txt files found in input/"
-    echo
-    echo -e "  Drop files into ${CYAN}input/${NC} and re-run."
     echo
     exit 0
   fi
@@ -274,25 +391,28 @@ main() {
     fi
   done
 
-  # ─── Summary ─────────────────────────────────────────────────────────────
+  local total=$(( passed + failed ))
 
+  # Write report
+  echo
+  local report_path
+  report_path=$(write_report "$passed" "$failed" "$total")
+  log "Report: ${CYAN}$(basename "$report_path")${NC}"
+
+  # Summary
   echo
   echo -e "${BOLD}─────────────────────────────────────${NC}"
   echo -e "  ${GREEN}Passed: $passed${NC}  |  ${RED}Failed: $failed${NC}"
   echo -e "${BOLD}─────────────────────────────────────${NC}"
 
   if [[ $failed -gt 0 ]]; then
-    echo -e "\n  ${RED}One or more conversions failed verification.${NC}"
-    echo -e "  Check the files above for details.\n"
+    echo -e "\n  ${RED}One or more conversions failed — see report for details.${NC}\n"
     exit 1
   else
-    echo -e "\n  ${GREEN}All conversions verified.${NC}"
-    echo -e "  Outputs + SHA-256 sidecars in ${CYAN}output/${NC}\n"
+    echo -e "\n  ${GREEN}All conversions verified.${NC}  Outputs in ${CYAN}output/${NC}\n"
     exit 0
   fi
 }
 
-# Cleanup temp dir on exit
 trap 'rm -rf "$TEMP_DIR"' EXIT
-
 main "$@"
