@@ -33,6 +33,9 @@ TEMP_DIR="$(mktemp -d)"
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$REPORT_DIR"
 
+# Ensure reports subfolder always exists
+mkdir -p "$SCRIPT_DIR/output/reports"
+
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'

@@ -24,4 +24,4 @@ WORD_SIZE=4
 # Change these if you want to point input/output elsewhere.
 INPUT_DIR="input"
 OUTPUT_DIR="output"
-REPORT_DIR="output"   # Conversion reports land here
+REPORT_DIR="output/reports"   # Conversion reports land here
