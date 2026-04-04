@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# bintxt.sh — Binary ↔ Text conversion tool
+# convert_inputs.sh — Binary ↔ Text conversion tool
 #
-# Usage:  ./bintxt.sh [--endian little|big]
+# Usage:  ./convert_inputs.sh [--endian little|big]
 #
 # Drop .bin files into ./input/ to convert → text
 # Drop .txt files  into ./input/ to convert → binary
@@ -19,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="$SCRIPT_DIR/input"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 TEMP_DIR="$(mktemp -d)"
+
+# Ensure folders exist (they should be committed, but just in case)
+mkdir -p "$INPUT_DIR" "$OUTPUT_DIR"
 
 # Byte order for 4-byte integer reconstruction (little = x86/ARM LE, big = MIPS/PowerPC)
 ENDIAN="little"
@@ -66,26 +69,10 @@ sha256() {
   fi
 }
 
-# ─── First-run setup ─────────────────────────────────────────────────────────
+# ─── Dir check ───────────────────────────────────────────────────────────────
 
 setup_dirs() {
-  local first_run=false
-  [[ -d "$INPUT_DIR" ]] || first_run=true
-
-  mkdir -p "$INPUT_DIR" "$OUTPUT_DIR"
-
-  if $first_run; then
-    echo -e "\n${CYAN}${BOLD}bintxt_tool — first run setup${NC}"
-    echo -e "  Created: ${CYAN}input/${NC}  and  ${CYAN}output/${NC}"
-    echo
-    echo -e "  Drop files into ${CYAN}input/${NC}:"
-    echo -e "    • ${BOLD}.bin${NC} files → converted to .txt  (od hex dump)"
-    echo -e "    • ${BOLD}.txt${NC} files → converted to .bin  (od reverse)"
-    echo
-    echo -e "  Then re-run ${BOLD}./bintxt.sh${NC}"
-    echo
-    exit 0
-  fi
+  : # input/ and output/ are part of the repo — nothing to create
 }
 
 # ─── BIN → TXT ───────────────────────────────────────────────────────────────
