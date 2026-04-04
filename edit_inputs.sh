@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
 # =============================================================================
-# edit_inputs.sh — Text → Binary apply (APPLY)
+# edit_inputs.sh — Review-before-commit DRAFT workflow
 #
-# Usage:  ./edit_inputs.sh
+# Usage:
+#   ./edit_inputs.sh           — DRAFT mode
+#   ./edit_inputs.sh apply     — APPLY mode
 #
-# Drop edited .txt files into ./input/ after running convert_inputs.sh.
-# This script validates each file against config, writes a __DRAFT_ copy
-# to output/ for review, then prompts whether to convert to .bin.
+# ── DRAFT mode (no args) ──────────────────────────────────────────────────────
+#   Scans input/ for .bin and .txt files and writes DRAFT copies to output/:
+#     .bin files  → extracted to text → output/__DRAFT_name.txt
+#     .txt files  → format-verified, normalized → output/__DRAFT_name.txt
+#   Writes a draft report. Exits cleanly. No prompt, no timeout.
 #
-#   [y] → all .txt files are converted to .bin, __DRAFTs cleaned up
-#   [n] → stops here; __DRAFT files are preserved in output/ for inspection
+# ── APPLY mode (./edit_inputs.sh apply) ───────────────────────────────────────
+#   Scans output/ for __DRAFT_*.txt files.
+#   Validates each against config, converts to output/name.bin.
+#   Removes the __DRAFT_ copy on success.
+#   Writes an apply report. Exits cleanly.
+#
+# Interrupted mid-run (terminal closed)? Draft files remain in output/ and
+# the report captures what was done up to that point on next apply run.
 #
 # Outputs land in ./output/   Reports land in ./output/reports/
-# Edit config.sh to change word size, byte order, or folder paths.
-# Config is the source of truth — all .txt files are validated against
-# WORD_SIZE and ENDIAN before conversion.
+# Config is the source of truth — all files validated against WORD_SIZES/ENDIAN.
 # =============================================================================
 
 set -euo pipefail
@@ -27,10 +35,15 @@ if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
   source "$SCRIPT_DIR/config.sh"
 else
   ENDIAN="little"
-  WORD_SIZE=4
+  WORD_SIZES=(4)
   INPUT_DIR="input"
   OUTPUT_DIR="output"
   REPORT_DIR="output/reports"
+fi
+
+# Backward-compat: if old WORD_SIZE is set but WORD_SIZES is not
+if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
+  WORD_SIZES=("$WORD_SIZE")
 fi
 
 INPUT_DIR="$SCRIPT_DIR/$INPUT_DIR"
@@ -39,6 +52,14 @@ REPORT_DIR="$SCRIPT_DIR/$REPORT_DIR"
 TEMP_DIR="$(mktemp -d)"
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$REPORT_DIR"
+
+STRIDE=0
+LAYOUT_LABEL=""
+for ws in "${WORD_SIZES[@]}"; do
+  (( STRIDE += ws )) || true
+  LAYOUT_LABEL+="${ws}B+"
+done
+LAYOUT_LABEL="${LAYOUT_LABEL%+}"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -53,6 +74,8 @@ header() { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
 
 # ─── Report state ────────────────────────────────────────────────────────────
 
+DRAFT_ENTRIES=()
+DRAFT_ERRORS=()
 APPLY_ENTRIES=()
 APPLY_ERRORS=()
 
@@ -60,9 +83,7 @@ APPLY_ERRORS=()
 
 check_deps() {
   local missing=()
-  for cmd in od python3; do
-    command -v "$cmd" &>/dev/null || missing+=("$cmd")
-  done
+  command -v python3 &>/dev/null || missing+=("python3")
   if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
     missing+=("sha256sum or shasum")
   fi
@@ -70,6 +91,16 @@ check_deps() {
     err "Missing required tools: ${missing[*]}"
     exit 1
   fi
+  if [[ ${#WORD_SIZES[@]} -lt 1 || ${#WORD_SIZES[@]} -gt 6 ]]; then
+    err "WORD_SIZES must have 1–6 entries (got ${#WORD_SIZES[@]})"
+    exit 1
+  fi
+  for ws in "${WORD_SIZES[@]}"; do
+    if [[ "$ws" != "1" && "$ws" != "2" && "$ws" != "4" && "$ws" != "8" ]]; then
+      err "Invalid word size: $ws (must be 1, 2, 4, or 8)"
+      exit 1
+    fi
+  done
 }
 
 sha256() {
@@ -80,31 +111,53 @@ sha256() {
   fi
 }
 
-# ─── BIN → TXT (used for roundtrip verification only) ────────────────────────
+# ─── BIN → TXT ───────────────────────────────────────────────────────────────
 
 bin_to_txt() {
   local src="$1" dst="$2"
-  od -tx${WORD_SIZE} -Ax -v -w${WORD_SIZE} "$src" > "$dst"
+  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
+import sys
+
+src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
+word_sizes = [int(x) for x in sys.argv[4:]]
+stride = sum(word_sizes)
+
+with open(src, 'rb') as f:
+    data = f.read()
+
+lines = []
+offset = 0
+
+while offset < len(data):
+    parts = [f"{offset:08x}"]
+    cur = offset
+    for ws in word_sizes:
+        chunk = data[cur:cur+ws] if cur + ws <= len(data) else \
+                data[cur:] + b'\x00' * (ws - max(0, len(data) - cur))
+        val = int.from_bytes(chunk[:ws], byteorder=endian)
+        parts.append(f"{val:0{ws*2}x}")
+        cur += ws
+    lines.append(" ".join(parts))
+    offset += stride
+
+lines.append(f"{offset:08x}")
+
+with open(dst, 'w') as f:
+    f.write('\n'.join(lines) + '\n')
+PYEOF
 }
 
 # ─── TXT → BIN ───────────────────────────────────────────────────────────────
 
 txt_to_bin() {
   local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$ENDIAN" "$WORD_SIZE" <<'PYEOF'
-import sys, struct
+  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
+import sys
 
-src, dst, endian, word_size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-
-fmt_map = {1: ('B','B'), 2: ('<H','>H'), 4: ('<I','>I'), 8: ('<Q','>Q')}
-if word_size not in fmt_map:
-    print(f"ERROR: unsupported WORD_SIZE {word_size}", file=sys.stderr)
-    sys.exit(1)
-
-le_fmt, be_fmt = fmt_map[word_size]
-fmt = le_fmt if endian == 'little' else be_fmt
-if word_size == 1:
-    fmt = 'B'
+src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
+word_sizes = [int(x) for x in sys.argv[4:]]
+n_words = len(word_sizes)
+stride  = sum(word_sizes)
 
 entries = []
 with open(src) as f:
@@ -114,40 +167,45 @@ with open(src) as f:
             continue
         try:
             addr = int(parts[0], 16)
-            val  = int(parts[1], 16)
-            entries.append((addr, val))
+            vals = [int(v, 16) for v in parts[1:n_words + 1]]
         except ValueError:
             continue
+        if len(vals) < n_words:
+            continue
+        entries.append((addr, vals))
 
 if not entries:
-    print("ERROR: no valid address/value pairs found", file=sys.stderr)
+    print("ERROR: no valid rows found", file=sys.stderr)
     sys.exit(1)
 
-max_addr  = max(addr for addr, _ in entries)
-file_size = max_addr + word_size
+last_addr = entries[-1][0]
+file_size = last_addr + stride
 buf = bytearray(file_size)
-for addr, val in entries:
-    buf[addr:addr+word_size] = struct.pack(fmt, val)
+
+for addr, vals in entries:
+    cur = addr
+    for val, ws in zip(vals, word_sizes):
+        buf[cur:cur+ws] = val.to_bytes(ws, byteorder=endian)
+        cur += ws
 
 with open(dst, 'wb') as f:
     f.write(buf)
 PYEOF
 }
 
-# ─── TXT format validation against config ────────────────────────────────────
+# ─── TXT format validation ────────────────────────────────────────────────────
 
 validate_txt_format() {
   local src="$1"
-  local expected_val_len=$(( WORD_SIZE * 2 ))
-
-  python3 - "$src" "$WORD_SIZE" "$expected_val_len" <<'PYEOF'
+  python3 - "$src" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
 import sys
 
-src       = sys.argv[1]
-word_size = int(sys.argv[2])
-val_len   = int(sys.argv[3])
-issues    = []
-line_num  = 0
+src        = sys.argv[1]
+endian     = sys.argv[2]
+word_sizes = [int(x) for x in sys.argv[3:]]
+n_words    = len(word_sizes)
+issues     = []
+line_num   = 0
 
 with open(src) as f:
     for raw in f:
@@ -157,7 +215,7 @@ with open(src) as f:
             continue
         parts = line.split()
         if len(parts) == 1:
-            continue  # final address-only line — ok
+            continue
         if len(parts) < 2:
             issues.append(f"line {line_num}: unparseable — '{line[:60]}'")
             continue
@@ -166,18 +224,28 @@ with open(src) as f:
         except ValueError:
             issues.append(f"line {line_num}: bad address '{parts[0]}'")
             continue
-        if addr % word_size != 0:
-            issues.append(f"line {line_num}: address 0x{addr:x} not aligned to WORD_SIZE={word_size}")
-        try:
-            val = int(parts[1], 16)
-        except ValueError:
-            issues.append(f"line {line_num}: bad value '{parts[1]}'")
+
+        stride = sum(word_sizes)
+        if addr % stride != 0:
+            issues.append(f"line {line_num}: address 0x{addr:x} not aligned to stride={stride}")
+
+        val_parts = parts[1:]
+        if len(val_parts) != n_words:
+            issues.append(f"line {line_num}: expected {n_words} value column(s), got {len(val_parts)}")
             continue
-        max_val = (1 << (word_size * 8)) - 1
-        if val > max_val:
-            issues.append(f"line {line_num}: value 0x{val:x} overflows WORD_SIZE={word_size} bytes")
-        if len(parts[1]) != val_len:
-            issues.append(f"line {line_num}: value width {len(parts[1])} chars (expected {val_len} for WORD_SIZE={word_size})")
+
+        for i, (vp, ws) in enumerate(zip(val_parts, word_sizes)):
+            expected_len = ws * 2
+            try:
+                val = int(vp, 16)
+            except ValueError:
+                issues.append(f"line {line_num}: word {i+1}: bad hex '{vp}'")
+                continue
+            max_val = (1 << (ws * 8)) - 1
+            if val > max_val:
+                issues.append(f"line {line_num}: word {i+1}: value 0x{val:x} overflows {ws}-byte field")
+            if len(vp) != expected_len:
+                issues.append(f"line {line_num}: word {i+1}: width {len(vp)} chars (expected {expected_len} for {ws}B)")
 
 if issues:
     print("ISSUES\n" + "\n".join(issues))
@@ -186,16 +254,16 @@ else:
 PYEOF
 }
 
-# ─── Write config-normalized txt ─────────────────────────────────────────────
+# ─── Normalize TXT ───────────────────────────────────────────────────────────
 
 normalize_txt() {
   local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$WORD_SIZE" <<'PYEOF'
+  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
 import sys
 
-src, dst, word_size = sys.argv[1], sys.argv[2], int(sys.argv[3])
-val_len  = word_size * 2
-addr_len = 8
+src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
+word_sizes = [int(x) for x in sys.argv[4:]]
+n_words = len(word_sizes)
 lines_out = []
 
 with open(src) as f:
@@ -206,13 +274,18 @@ with open(src) as f:
         parts = line.split()
         if len(parts) == 1:
             try:
-                lines_out.append(f"{int(parts[0], 16):0{addr_len}x}")
+                lines_out.append(f"{int(parts[0], 16):08x}")
             except ValueError:
                 lines_out.append(line)
             continue
-        if len(parts) >= 2:
+        if len(parts) >= n_words + 1:
             try:
-                lines_out.append(f"{int(parts[0], 16):0{addr_len}x} {int(parts[1], 16):0{val_len}x}")
+                addr = int(parts[0], 16)
+                row = [f"{addr:08x}"]
+                for i, ws in enumerate(word_sizes):
+                    val = int(parts[i+1], 16) if i+1 < len(parts) else 0
+                    row.append(f"{val:0{ws*2}x}")
+                lines_out.append(" ".join(row))
                 continue
             except ValueError:
                 pass
@@ -225,23 +298,44 @@ PYEOF
 
 # ─── Verification ────────────────────────────────────────────────────────────
 
-normalize_for_compare() {
-  sed 's/[[:space:]]*$//' "$1" | tr '[:upper:]' '[:lower:]' | grep -v '^[[:space:]]*$'
+verify_bin_roundtrip() {
+  local orig_bin="$1" gen_txt="$2"
+  local temp_bin="$TEMP_DIR/rt_$(basename "$orig_bin")"
+  txt_to_bin "$gen_txt" "$temp_bin" 2>/dev/null || { echo "ROUNDTRIP_FAILED"; return 1; }
+  local orig_hash rt_hash
+  orig_hash=$(sha256 "$orig_bin")
+  rt_hash=$(sha256 "$temp_bin")
+  echo "$orig_hash $rt_hash"
+  [[ "$orig_hash" == "$rt_hash" ]]
 }
 
-verify_txt_to_bin() {
+normalize_for_compare() {
+  # Lowercase, strip trailing whitespace, skip blanks, pad addresses to 8 hex digits
+  python3 - "$1" <<'PYNORM'
+import sys
+for raw in open(sys.argv[1]):
+    line = raw.strip().lower()
+    if not line:
+        continue
+    parts = line.split()
+    try:
+        parts[0] = f"{int(parts[0], 16):08x}"
+    except (ValueError, IndexError):
+        pass
+    print(" ".join(parts))
+PYNORM
+}
+
+verify_txt_roundtrip() {
   local orig_txt="$1" gen_bin="$2"
   local temp_txt="$TEMP_DIR/rt_$(basename "$orig_txt")"
   bin_to_txt "$gen_bin" "$temp_txt"
-
   local gen_hash; gen_hash=$(sha256 "$gen_bin")
   local norm_orig norm_rt
   norm_orig=$(normalize_for_compare "$orig_txt")
   norm_rt=$(normalize_for_compare "$temp_txt")
-
   if [[ "$norm_orig" == "$norm_rt" ]]; then
-    echo "$gen_hash"
-    return 0
+    echo "$gen_hash"; return 0
   else
     echo "MISMATCH"
     diff <(echo "$norm_orig") <(echo "$norm_rt") 2>&1 || true
@@ -253,10 +347,10 @@ verify_txt_to_bin() {
 
 format_entry() {
   local direction="$1" filename="$2" output="$3" size="$4"
-  local hash_a="$5" hash_b="$6" status="$7" detail="$8" fmt_notes="$9"
+  local hash_a="$5" hash_b="$6" status="$7" detail="$8" fmt_notes="${9:-}"
   local icon="✓  PASS"
   [[ "$status" == "FAIL"  ]] && icon="✗  FAIL"
-  [[ "$status" == "DRAFT" ]] && icon="—  DRAFT ONLY (binary conversion skipped)"
+  [[ "$status" == "DRAFT" ]] && icon="—  DRAFT (pending apply)"
   {
     echo "  File            : $filename"
     echo "  Direction       : $direction"
@@ -270,65 +364,160 @@ format_entry() {
   }
 }
 
-# ─── DRAFT: validate and write __DRAFT_ copy ─────────────────────────────────
+# ─── DRAFT MODE ──────────────────────────────────────────────────────────────
 
-draft_file() {
+# Draft a .bin file: extract → __DRAFT_name.txt
+draft_bin() {
   local src="$1"
   local filename; filename="$(basename "$src")"
   local base="${filename%.*}"
   local draft_dst="$OUTPUT_DIR/__DRAFT_${base}.txt"
-  local fmt_notes
+  local status="DRAFT" detail="" hash_a hash_b
 
-  log "${CYAN}DRAFT${NC}    $filename"
+  log "${CYAN}DRAFT${NC}  BIN→TXT  $filename"
+  hash_a=$(sha256 "$src")
+  local input_size; input_size="$(wc -c < "$src") bytes"
+
+  bin_to_txt "$src" "$draft_dst"
+
+  local rows; rows=$(grep -c ' ' "$draft_dst" 2>/dev/null || echo 0)
+  local output_info="__DRAFT_${base}.txt  (${rows} rows)"
+  log "       → ${CYAN}${output_info}${NC}"
+
+  # Quick roundtrip check for the draft itself
+  local verify_out
+  if verify_out=$(verify_bin_roundtrip "$src" "$draft_dst" 2>&1); then
+    read -r _ hash_b <<< "$verify_out"
+    ok "Roundtrip verified  SHA-256: ${hash_b:0:20}…"
+  else
+    status="FAIL"; hash_b="n/a"
+    detail="Roundtrip check failed on draft — source binary may be malformed."
+    err "Draft roundtrip failed"
+    DRAFT_ERRORS+=("[$filename] $detail")
+  fi
+
+  DRAFT_ENTRIES+=("$(format_entry "BIN → TXT  [DRAFTED]" "$filename" "$output_info" "$input_size" "$hash_a" "$hash_b" "$status" "$detail")")
+  [[ "$status" != "FAIL" ]]
+}
+
+# Draft a .txt file: format-check + normalize → __DRAFT_name.txt
+draft_txt() {
+  local src="$1"
+  local filename; filename="$(basename "$src")"
+  local base="${filename%.*}"
+  local draft_dst="$OUTPUT_DIR/__DRAFT_${base}.txt"
+  local status="DRAFT" detail="" fmt_notes=""
+
+  log "${CYAN}DRAFT${NC}  TXT      $filename"
 
   local fmt_result
   fmt_result=$(validate_txt_format "$src" 2>&1)
   if [[ "$fmt_result" == OK ]]; then
-    fmt_notes="Format matches config (WORD_SIZE=${WORD_SIZE}, ENDIAN=${ENDIAN})"
-    ok "Format valid — matches config"
+    fmt_notes="Format matches config (WORD_SIZES=${WORD_SIZES[*]}, ENDIAN=${ENDIAN})"
+    ok "Format valid"
   else
     local issue_lines; issue_lines=$(echo "$fmt_result" | tail -n +2)
-    fmt_notes="Format mismatches — normalized. Issues: $(echo "$issue_lines" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
-    warn "Format issues found — normalizing for DRAFT:"
+    fmt_notes="Format issues found — normalized. Issues: $(echo "$issue_lines" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    warn "Format issues vs config — normalized in DRAFT:"
     echo "$issue_lines" | head -5 | sed 's/^/         /'
   fi
 
   normalize_txt "$src" "$draft_dst"
-  log "         → ${CYAN}__DRAFT_${base}.txt${NC} written to output/"
+  log "       → ${CYAN}__DRAFT_${base}.txt${NC}"
 
   local hash_a; hash_a=$(sha256 "$src")
+  local hash_b; hash_b=$(sha256 "$draft_dst")
   local input_size; input_size="$(wc -l < "$src") lines"
-  APPLY_ENTRIES+=("$(format_entry "TXT → DRAFT  [APPLY PENDING]" "$filename" "__DRAFT_${base}.txt" "$input_size" "$hash_a" "n/a" "DRAFT" "" "$fmt_notes")")
+
+  DRAFT_ENTRIES+=("$(format_entry "TXT → DRAFT  [FORMAT CHECK]" "$filename" "__DRAFT_${base}.txt" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")")
 }
 
-# ─── APPLY: convert .txt to .bin (after user confirms y) ─────────────────────
+# Write the draft report
+write_draft_report() {
+  local total="$1" failed="$2"
+  local dt_file dt_display
+  dt_file=$(date '+%Y-%m-%d_%I%M%p' | tr '[:upper:]' '[:lower:]')
+  dt_display=$(date '+%Y-%m-%d  %I:%M %p')
+  local report_file="$REPORT_DIR/${dt_file}_bintxt-tool_draft_report.txt"
 
-apply_file() {
+  {
+    echo "============================================================"
+    echo "  BINTXT_TOOL — DRAFT REPORT"
+    echo "  Generated : $dt_display"
+    echo "============================================================"
+    echo
+    echo "  Configuration (source of truth)"
+    echo "  --------------------------------"
+    echo "  Word layout : ${LAYOUT_LABEL}  (${#WORD_SIZES[@]} word(s), ${STRIDE}B stride)"
+    echo "  Byte order  : $ENDIAN-endian"
+    echo "  Input dir   : $INPUT_DIR"
+    echo "  Output dir  : $OUTPUT_DIR"
+    echo
+    echo "  Summary"
+    echo "  -------"
+    echo "  Drafted     : $total"
+    echo "  Errors      : $failed"
+    echo "  Status      : $([ $failed -gt 0 ] && echo "DRAFT WITH ERRORS" || echo "ALL DRAFTED")"
+    echo
+    echo "  Next step: review __DRAFT_* files in output/, then run:"
+    echo "    ./edit_inputs.sh apply"
+    echo
+    echo "============================================================"
+    echo "  DRAFT FILES"
+    echo "============================================================"
+    echo
+    local i=1
+    for entry in "${DRAFT_ENTRIES[@]}"; do
+      printf "  [%d]\n" "$i"
+      echo "$entry"
+      echo
+      (( i++ ))
+    done
+    if [[ ${#DRAFT_ERRORS[@]} -gt 0 ]]; then
+      echo "============================================================"
+      echo "  ERRORS"
+      echo "============================================================"
+      echo
+      for e in "${DRAFT_ERRORS[@]}"; do
+        echo "$e"
+        echo
+      done
+    fi
+    echo "============================================================"
+    echo "  END OF REPORT  —  bintxt_tool  (${LAYOUT_LABEL}, ENDIAN=${ENDIAN})"
+    echo "============================================================"
+  } > "$report_file"
+
+  echo "$report_file"
+}
+
+# ─── APPLY MODE ──────────────────────────────────────────────────────────────
+
+# Apply a single __DRAFT_*.txt → name.bin
+apply_draft() {
   local src="$1"
-  local filename; filename="$(basename "$src")"
-  local base="${filename%.*}"
+  local filename; filename="$(basename "$src")"            # __DRAFT_name.txt
+  local base="${filename#__DRAFT_}"                        # name.txt
+  base="${base%.*}"                                        # name
   local dst="$OUTPUT_DIR/${base}.bin"
-  local norm_dst="$OUTPUT_DIR/${base}.txt"
-  local draft_dst="$OUTPUT_DIR/__DRAFT_${base}.txt"
   local status="PASS" detail="" fmt_notes="" hash_a hash_b output_info input_size
 
-  log "${CYAN}APPLY${NC}    TXT→BIN  $filename"
+  log "${CYAN}APPLY${NC}  __DRAFT_${base}.txt → ${base}.bin"
 
   local fmt_result
   fmt_result=$(validate_txt_format "$src" 2>&1)
   if [[ "$fmt_result" == OK ]]; then
-    fmt_notes="Format matches config (WORD_SIZE=${WORD_SIZE}, ENDIAN=${ENDIAN})"
+    fmt_notes="Format matches config (WORD_SIZES=${WORD_SIZES[*]}, ENDIAN=${ENDIAN})"
+    ok "Format valid"
   else
     local issue_lines; issue_lines=$(echo "$fmt_result" | tail -n +2)
     fmt_notes="Mismatches corrected. Issues: $(echo "$issue_lines" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    warn "Format issues — normalizing before apply:"
+    echo "$issue_lines" | head -5 | sed 's/^/         /'
   fi
 
   input_size="$(wc -l < "$src") lines"
   hash_a=$(sha256 "$src")
-
-  # Write normalized canonical txt to output/
-  normalize_txt "$src" "$norm_dst"
-  log "         → Normalized: $(basename "$norm_dst")"
 
   local py_err
   if ! py_err=$(txt_to_bin "$src" "$dst" 2>&1); then
@@ -336,61 +525,40 @@ apply_file() {
     detail="$py_err"
     output_info="${base}.bin  (conversion failed)"
     err "Conversion failed: $py_err"
-    APPLY_ERRORS+=("[$filename] $detail")
-    _replace_draft_entry "$filename" "$(format_entry "TXT → BIN  [APPLY]" "$filename" "$output_info" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")"
+    APPLY_ERRORS+=("[${filename}] $detail")
+    APPLY_ENTRIES+=("$(format_entry "__DRAFT → BIN  [APPLY]" "$filename" "$output_info" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")")
     return 1
   fi
 
   local bytes; bytes=$(wc -c < "$dst")
   output_info="${base}.bin  (${bytes} bytes)"
-  log "         → $output_info"
+  log "       → $output_info"
+  hash_b=$(sha256 "$dst")
 
   local verify_out
-  if verify_out=$(verify_txt_to_bin "$src" "$dst" 2>&1); then
+  if verify_out=$(verify_txt_roundtrip "$src" "$dst" 2>&1); then
     hash_b="$verify_out"
     ok "Roundtrip verified  SHA-256: ${hash_b:0:20}…"
+    # Clean up draft on success
+    rm -f "$src"
+    log "       → DRAFT removed"
   else
     status="FAIL"; hash_b="n/a"
     detail="$(echo "$verify_out" | tail -10)"
-    err "Verification failed — roundtrip diff"
-    APPLY_ERRORS+=("[$filename] Roundtrip diff:"$'\n'"$detail")
+    err "Roundtrip verification failed"
+    APPLY_ERRORS+=("[${filename}] Roundtrip diff:"$'\n'"$detail")
   fi
 
-  # Clean up __DRAFT now that binary is committed
-  if [[ -f "$draft_dst" ]]; then rm -f "$draft_dst"; log "         → __DRAFT cleaned up"; fi
-
-  _replace_draft_entry "$filename" "$(format_entry "TXT → BIN  [APPLY]" "$filename" "$output_info" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")"
+  APPLY_ENTRIES+=("$(format_entry "__DRAFT → BIN  [APPLY]" "$filename" "$output_info" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")")
   [[ "$status" == "PASS" ]]
 }
 
-# Replace the pending DRAFT entry with the final APPLY entry
-_replace_draft_entry() {
-  local target="$1" new_entry="$2"
-  local new_entries=() replaced=0 i
-  for (( i=${#APPLY_ENTRIES[@]}-1; i>=0; i-- )); do
-    if [[ $replaced -eq 0 && "${APPLY_ENTRIES[$i]}" == *"$target"* && "${APPLY_ENTRIES[$i]}" == *"APPLY PENDING"* ]]; then
-      replaced=1
-    else
-      new_entries=("${APPLY_ENTRIES[$i]}" "${new_entries[@]+"${new_entries[@]}"}")
-    fi
-  done
-  new_entries+=("$new_entry")
-  APPLY_ENTRIES=("${new_entries[@]+"${new_entries[@]}"}")
-}
-
-# ─── Write report ────────────────────────────────────────────────────────────
-
-write_report() {
-  local passed="$1" failed="$2" draft_only="$3" total="$4"
+write_apply_report() {
+  local passed="$1" failed="$2" total="$3"
   local dt_file dt_display
   dt_file=$(date '+%Y-%m-%d_%I%M%p' | tr '[:upper:]' '[:lower:]')
   dt_display=$(date '+%Y-%m-%d  %I:%M %p')
-
   local report_file="$REPORT_DIR/${dt_file}_bintxt-tool_text-to-binary_apply_conversion-report.txt"
-
-  local overall="ALL PASSED"
-  [[ $failed -gt 0 ]] && overall="COMPLETED WITH ERRORS"
-  [[ $passed -eq 0 && $failed -eq 0 ]] && overall="DRAFT ONLY — binary conversion skipped"
 
   {
     echo "============================================================"
@@ -400,9 +568,9 @@ write_report() {
     echo
     echo "  Configuration (source of truth)"
     echo "  --------------------------------"
-    echo "  Word size   : ${WORD_SIZE} byte(s)  ($(( WORD_SIZE * 8 ))-bit words)"
+    echo "  Word layout : ${LAYOUT_LABEL}  (${#WORD_SIZES[@]} word(s), ${STRIDE}B stride)"
     echo "  Byte order  : $ENDIAN-endian"
-    echo "  Input dir   : $INPUT_DIR"
+    echo "  Input       : output/__DRAFT_*.txt"
     echo "  Output dir  : $OUTPUT_DIR"
     echo "  Report dir  : $REPORT_DIR"
     echo
@@ -411,8 +579,7 @@ write_report() {
     echo "  Files total : $total"
     echo "  Passed      : $passed"
     echo "  Failed      : $failed"
-    if [[ $draft_only -gt 0 ]]; then echo "  Draft only  : $draft_only  (binary conversion skipped)"; fi
-    echo "  Status      : $overall"
+    echo "  Status      : $([ $failed -gt 0 ] && echo "COMPLETED WITH ERRORS" || echo "ALL PASSED")"
     echo
     echo "============================================================"
     echo "  CONVERSIONS"
@@ -436,99 +603,130 @@ write_report() {
       done
     fi
     echo "============================================================"
-    echo "  END OF REPORT  —  bintxt_tool  (WORD_SIZE=${WORD_SIZE}, ENDIAN=${ENDIAN})"
+    echo "  END OF REPORT  —  bintxt_tool  (${LAYOUT_LABEL}, ENDIAN=${ENDIAN})"
     echo "============================================================"
   } > "$report_file"
 
   echo "$report_file"
 }
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# ─── DRAFT subcommand ─────────────────────────────────────────────────────────
 
-main() {
-  check_deps
-
-  echo -e "\n${BOLD}${BLUE}bintxt_tool  —  APPLY${NC}  (word: ${WORD_SIZE}B · endian: ${ENDIAN})"
+run_draft() {
+  echo -e "\n${BOLD}${BLUE}bintxt_tool  —  DRAFT${NC}  (layout: ${LAYOUT_LABEL} · endian: ${ENDIAN})"
   echo -e "  Input:   ${CYAN}$INPUT_DIR${NC}"
   echo -e "  Output:  ${CYAN}$OUTPUT_DIR${NC}"
-  echo -e "  Reports: ${CYAN}$REPORT_DIR${NC}"
 
-  local txt_files=()
+  local bin_files=() txt_files=()
   while IFS= read -r -d '' f; do
-    txt_files+=("$f")
-  done < <(find "$INPUT_DIR" -maxdepth 1 -type f -iname "*.txt" -print0 | sort -z)
+    local ext="${f##*.}"
+    case "${ext,,}" in
+      bin) bin_files+=("$f") ;;
+      txt) txt_files+=("$f") ;;
+    esac
+  done < <(find "$INPUT_DIR" -maxdepth 1 -type f \( -iname "*.bin" -o -iname "*.txt" \) -print0 | sort -z)
 
-  if [[ ${#txt_files[@]} -eq 0 ]]; then
-    warn "No .txt files found in input/"
-    log "Run ${CYAN}convert_inputs.sh${NC} first to extract .bin files to text."
+  if [[ $(( ${#bin_files[@]} + ${#txt_files[@]} )) -eq 0 ]]; then
+    warn "No .bin or .txt files found in input/"
     echo
     sleep 5
     exit 0
   fi
 
-  # ── DRAFT phase ─────────────────────────────────────────────────────────────
-  header "DRAFT — validating ${#txt_files[@]} text file(s)…"
-  for f in "${txt_files[@]}"; do
-    echo
-    draft_file "$f"
-  done
+  local drafted=0 failed=0
 
-  echo
-  echo -e "  ${CYAN}__DRAFT copies written to output/${NC} — review before committing to binary."
-  echo -e "  Convert all to binary? [y/N] \c"
-
-  local answer="n"
-  if read -r -t 60 answer 2>/dev/null; then
-    : # got input within timeout
-  else
-    echo
-    warn "No response after 60s — skipping binary conversion. __DRAFT files preserved."
-  fi
-
-  local draft_only=${#txt_files[@]}
-  local passed=0 failed=0
-
-  # ── APPLY phase (only if user said y) ───────────────────────────────────────
-  if [[ "${answer,,}" == "y" ]]; then
-    draft_only=0
-    header "APPLY — converting ${#txt_files[@]} file(s) to binary…"
-    for f in "${txt_files[@]}"; do
+  if [[ ${#bin_files[@]} -gt 0 ]]; then
+    header "Binary files — extracting to DRAFT text…"
+    for f in "${bin_files[@]}"; do
       echo
-      if apply_file "$f"; then
-        (( passed++ )) || true
+      if draft_bin "$f"; then
+        (( drafted++ )) || true
       else
         (( failed++ )) || true
       fi
     done
-  else
-    log "Binary conversion skipped — __DRAFT files preserved in output/"
   fi
 
-  # ── Write report ─────────────────────────────────────────────────────────────
-  local total=$(( passed + failed + draft_only ))
-  echo
-  header "Writing report…"
-  local rpt
-  rpt=$(write_report "$passed" "$failed" "$draft_only" "$total")
-  ok "Apply report: ${CYAN}$(basename "$rpt")${NC}"
+  if [[ ${#txt_files[@]} -gt 0 ]]; then
+    header "Text files — format-checking to DRAFT…"
+    for f in "${txt_files[@]}"; do
+      echo
+      draft_txt "$f"
+      (( drafted++ )) || true
+    done
+  fi
 
-  # ── Summary ──────────────────────────────────────────────────────────────────
+  local total=$(( drafted + failed ))
+  echo
+  header "Writing draft report…"
+  local rpt; rpt=$(write_draft_report "$total" "$failed")
+  ok "Draft report: ${CYAN}$(basename "$rpt")${NC}"
+
   echo
   echo -e "${BOLD}─────────────────────────────────────${NC}"
-  if [[ $draft_only -gt 0 ]]; then
-    echo -e "  ${YELLOW}Draft: $draft_only${NC}  |  Total: $total"
+  echo -e "  ${CYAN}Drafted: $drafted${NC}  |  ${RED}Errors: $failed${NC}  |  Total: $total"
+  echo -e "  __DRAFT files in ${CYAN}output/${NC}"
+  echo -e "${BOLD}─────────────────────────────────────${NC}"
+
+  if [[ $failed -gt 0 ]]; then
+    echo -e "\n  ${RED}Some drafts had errors — review before applying.${NC}"
   else
-    echo -e "  ${GREEN}Passed: $passed${NC}  |  ${RED}Failed: $failed${NC}  |  Total: $total"
+    echo -e "\n  ${GREEN}All drafts created.${NC}  Review output/__DRAFT_* then run:"
+    echo -e "  ${CYAN}./edit_inputs.sh apply${NC}"
   fi
-  echo -e "  Outputs in ${CYAN}output/${NC}"
+
+  echo -e "\n  ${YELLOW}Closing in 5 seconds…${NC}"
+  sleep 5
+}
+
+# ─── APPLY subcommand ────────────────────────────────────────────────────────
+
+run_apply() {
+  echo -e "\n${BOLD}${BLUE}bintxt_tool  —  APPLY${NC}  (layout: ${LAYOUT_LABEL} · endian: ${ENDIAN})"
+  echo -e "  Drafts:  ${CYAN}$OUTPUT_DIR/__DRAFT_*${NC}"
+  echo -e "  Output:  ${CYAN}$OUTPUT_DIR${NC}"
+
+  local draft_files=()
+  while IFS= read -r -d '' f; do
+    draft_files+=("$f")
+  done < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -name "__DRAFT_*.txt" -print0 | sort -z)
+
+  if [[ ${#draft_files[@]} -eq 0 ]]; then
+    warn "No __DRAFT_*.txt files found in output/"
+    log "Run ${CYAN}./edit_inputs.sh${NC} first to create drafts."
+    echo
+    sleep 5
+    exit 0
+  fi
+
+  header "Applying ${#draft_files[@]} DRAFT file(s) to binary…"
+
+  local passed=0 failed=0
+  for f in "${draft_files[@]}"; do
+    echo
+    if apply_draft "$f"; then
+      (( passed++ )) || true
+    else
+      (( failed++ )) || true
+    fi
+  done
+
+  local total=$(( passed + failed ))
+  echo
+  header "Writing apply report…"
+  local rpt; rpt=$(write_apply_report "$passed" "$failed" "$total")
+  ok "Apply report: ${CYAN}$(basename "$rpt")${NC}"
+
+  echo
+  echo -e "${BOLD}─────────────────────────────────────${NC}"
+  echo -e "  ${GREEN}Passed: $passed${NC}  |  ${RED}Failed: $failed${NC}  |  Total: $total"
+  echo -e "  Binaries in ${CYAN}output/${NC}"
   echo -e "${BOLD}─────────────────────────────────────${NC}"
 
   if [[ $failed -gt 0 ]]; then
     echo -e "\n  ${RED}One or more conversions failed — see report for details.${NC}"
-  elif [[ $draft_only -gt 0 ]]; then
-    echo -e "\n  ${YELLOW}DRAFT only. Rerun and press y to convert to binary.${NC}"
   else
-    echo -e "\n  ${GREEN}All conversions verified successfully.${NC}"
+    echo -e "\n  ${GREEN}All drafts applied and verified.${NC}"
   fi
 
   echo -e "\n  ${YELLOW}Closing in 5 seconds…${NC}"
@@ -537,5 +735,19 @@ main() {
   [[ $failed -eq 0 ]]
 }
 
+# ─── Entry point ─────────────────────────────────────────────────────────────
+
+check_deps
+
+case "${1:-}" in
+  apply) run_apply ;;
+  "")    run_draft ;;
+  *)
+    echo -e "Usage: $0 [apply]"
+    echo -e "  (no args)  — create DRAFT copies of all input files"
+    echo -e "  apply      — convert __DRAFT_* files in output/ to binary"
+    exit 1
+    ;;
+esac
+
 trap 'rm -rf "$TEMP_DIR"' EXIT
-main "$@"
