@@ -2,6 +2,8 @@ input/*
 !input/.gitkeep
 !input/cfg-example.bin
 !input/cfg-example.txt
+!input/cfg-example2.bin
+!input/cfg-example2.txt
 
 output/*
 !output/.gitkeep
