@@ -1,5 +1,12 @@
 input/*
 !input/.gitkeep
+!input/cfg-example.bin
+!input/cfg-example.txt
+
 output/*
 !output/.gitkeep
+!output/reports/
+
+output/reports/*
 !output/reports/.gitkeep
+!output/reports/example_*
