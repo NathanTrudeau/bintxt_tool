@@ -176,7 +176,7 @@ class BintxtApp(tk.Tk):
 
         self._filebox = tk.Listbox(
             list_container,
-            bg=SURFACE, fg=FG, selectbackground=ACCENT+"33",
+            bg=SURFACE, fg=FG, selectbackground="#2a3d52",
             selectforeground=FG, font=MONO_S,
             relief="flat", borderwidth=0, highlightthickness=0,
             activestyle="none",
