@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # =============================================================================
-# compare_inputs.sh — Binary ↔ Text pair comparison (COMPARE)
+# compare_inputs.sh — Content fingerprinting + cross-match comparison
 #
 # Usage:  ./scripts/compare_inputs.sh
 #
-# Place matching .bin/.txt pairs in ./input/ — every .bin must have a .txt
-# with the exact same base name, and vice versa. Unpaired files are flagged
-# as errors and left untouched in input/.
+# Dump any mix of .bin and .txt files into input/. The script fingerprints
+# every file by its normalized binary content, then groups all files that
+# represent identical data — regardless of filename or file type.
 #
-# For each valid pair:
-#   1. The .bin is extracted to text using WORD_SIZES/ENDIAN from config.sh
-#   2. Both the extracted text and the input .txt are normalized and compared
-#   3. Result is MATCH or MISMATCH (with diff detail on mismatch)
-#   4. Both files of the pair are moved to output/ (marking them as reviewed)
+#   bin vs bin  — both extracted, normalized, compared
+#   txt vs txt  — both normalized, compared
+#   bin vs txt  — bin extracted to text, then compared against txt
 #
-# Unpaired files stay in input/ untouched.
+# Result: match groups (files with identical content), singletons (no match),
+# and any files that could not be processed (left in input/).
+#
+# All successfully fingerprinted files are moved to output/ as "reviewed".
 # A compare report is written to output/reports/ for every run.
 #
-# Config is the source of truth — the .bin is always extracted using current
+# Config is the source of truth — all .bin files are extracted using current
 # WORD_SIZES and ENDIAN settings for comparison.
 # =============================================================================
 
@@ -38,7 +39,6 @@ else
   REPORT_DIR="output/reports"
 fi
 
-# Backward-compat: old WORD_SIZE scalar
 if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
   WORD_SIZES=("$WORD_SIZE")
 fi
@@ -68,11 +68,6 @@ ok()     { echo -e "  ${GREEN}✓${NC} $*"; }
 warn()   { echo -e "  ${YELLOW}⚠${NC}  $*"; }
 err()    { echo -e "  ${RED}✗${NC} $*"; }
 header() { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
-
-# ─── Report state ────────────────────────────────────────────────────────────
-
-COMPARE_ENTRIES=()   # one entry per pair
-UNPAIRED=()          # filenames with no matching counterpart
 
 # ─── Dependency check ────────────────────────────────────────────────────────
 
@@ -106,7 +101,7 @@ sha256() {
   fi
 }
 
-# ─── BIN → TXT extraction ────────────────────────────────────────────────────
+# ─── BIN → normalized temp txt ───────────────────────────────────────────────
 
 bin_to_txt() {
   local src="$1" dst="$2"
@@ -122,7 +117,6 @@ with open(src, 'rb') as f:
 
 lines = []
 offset = 0
-
 while offset < len(data):
     parts = [f"{offset:08x}"]
     cur = offset
@@ -134,7 +128,6 @@ while offset < len(data):
         cur += ws
     lines.append(" ".join(parts))
     offset += stride
-
 lines.append(f"{offset:08x}")
 
 with open(dst, 'w') as f:
@@ -142,12 +135,13 @@ with open(dst, 'w') as f:
 PYEOF
 }
 
-# ─── Normalize for comparison ─────────────────────────────────────────────────
-# Lowercase, skip blanks, zero-pad addresses to 8 hex digits
+# ─── Normalize a txt file and write to dst ───────────────────────────────────
 
-normalize_for_compare() {
-  python3 - "$1" <<'PYNORM'
+normalize_txt() {
+  local src="$1" dst="$2"
+  python3 - "$src" "$dst" <<'PYEOF'
 import sys
+lines_out = []
 for raw in open(sys.argv[1]):
     line = raw.strip().lower()
     if not line:
@@ -157,92 +151,69 @@ for raw in open(sys.argv[1]):
         parts[0] = f"{int(parts[0], 16):08x}"
     except (ValueError, IndexError):
         pass
-    print(" ".join(parts))
-PYNORM
+    lines_out.append(" ".join(parts))
+with open(sys.argv[2], 'w') as f:
+    f.write('\n'.join(lines_out) + '\n')
+PYEOF
 }
 
-# ─── Format a single compare report entry ────────────────────────────────────
+# ─── Fingerprint a single file → content hash of normalized form ─────────────
+# Sets FP_HASH and FP_NORM_PATH on success, FP_ERROR on failure.
 
-format_pair_entry() {
-  local base="$1" bin_hash="$2" txt_hash="$3" result="$4" detail="$5"
-  local icon
-  if [[ "$result" == "MATCH" ]]; then
-    icon="✓  MATCH"
-  else
-    icon="✗  MISMATCH"
-  fi
-  {
-    echo "  Pair            : ${base}.bin  ↔  ${base}.txt"
-    echo "  SHA-256 (.bin)  : $bin_hash"
-    echo "  SHA-256 (.txt)  : $txt_hash"
-    echo "  Result          : $icon"
-    if [[ -n "$detail" ]]; then
-      echo "  Diff            :"
-      echo "$detail" | sed 's/^/    /'
-    fi
-  }
+FP_HASH=""
+FP_NORM_PATH=""
+FP_ERROR=""
+
+fingerprint_file() {
+  local src="$1"
+  local ext; ext="${src##*.}"
+  local fname; fname="$(basename "$src")"
+  local norm_path="$TEMP_DIR/norm_${fname}.txt"
+
+  FP_HASH=""; FP_NORM_PATH=""; FP_ERROR=""
+
+  case "${ext,,}" in
+    bin)
+      local extracted="$TEMP_DIR/extracted_${fname}.txt"
+      if ! bin_to_txt "$src" "$extracted" 2>/dev/null; then
+        FP_ERROR="Binary extraction failed"
+        return 1
+      fi
+      normalize_txt "$extracted" "$norm_path" 2>/dev/null || {
+        FP_ERROR="Normalization failed after extraction"
+        return 1
+      }
+      ;;
+    txt)
+      normalize_txt "$src" "$norm_path" 2>/dev/null || {
+        FP_ERROR="Text normalization failed"
+        return 1
+      }
+      ;;
+    *)
+      FP_ERROR="Unsupported file type"
+      return 1
+      ;;
+  esac
+
+  FP_HASH=$(sha256 "$norm_path")
+  FP_NORM_PATH="$norm_path"
 }
 
-# ─── Compare a single pair ───────────────────────────────────────────────────
-
-compare_pair() {
-  local bin_src="$1" txt_src="$2"
-  local base; base="$(basename "${bin_src%.*}")"
-
-  log "${CYAN}COMPARE${NC}  ${base}.bin  ↔  ${base}.txt"
-
-  local bin_hash txt_hash
-  bin_hash=$(sha256 "$bin_src")
-  txt_hash=$(sha256 "$txt_src")
-  log "         SHA-256 .bin: ${bin_hash:0:20}…"
-  log "         SHA-256 .txt: ${txt_hash:0:20}…"
-
-  # Extract bin to temp txt
-  local extracted_txt="$TEMP_DIR/extracted_${base}.txt"
-  if ! bin_to_txt "$bin_src" "$extracted_txt" 2>&1; then
-    err "Failed to extract ${base}.bin — skipping pair"
-    COMPARE_ENTRIES+=("$(format_pair_entry "$base" "$bin_hash" "$txt_hash" "ERROR" "Binary extraction failed.")")
-    return 1
-  fi
-
-  # Normalize both sides
-  local norm_extracted norm_input
-  norm_extracted=$(normalize_for_compare "$extracted_txt")
-  norm_input=$(normalize_for_compare "$txt_src")
-
-  local result detail=""
-  if [[ "$norm_extracted" == "$norm_input" ]]; then
-    result="MATCH"
-    ok "Contents MATCH"
-  else
-    result="MISMATCH"
-    detail=$(diff <(echo "$norm_extracted") <(echo "$norm_input") 2>&1 || true)
-    err "Contents MISMATCH"
-    echo "$detail" | head -10 | sed 's/^/         /'
-  fi
-
-  # Move both files to output/ (mark as reviewed)
-  mv "$bin_src" "$OUTPUT_DIR/${base}.bin"
-  mv "$txt_src" "$OUTPUT_DIR/${base}.txt"
-  log "         Moved to output/: ${base}.bin  ${base}.txt"
-
-  COMPARE_ENTRIES+=("$(format_pair_entry "$base" "$bin_hash" "$txt_hash" "$result" "$detail")")
-  [[ "$result" == "MATCH" ]]
-}
-
-# ─── Write compare report ────────────────────────────────────────────────────
+# ─── Write report ────────────────────────────────────────────────────────────
 
 write_report() {
-  local matched="$1" mismatched="$2" errors="$3" unpaired="$4"
+  local n_groups="$1" n_singletons="$2" n_errors="$3" n_total="$4"
+  # Pass group data via temp file to avoid subshell issues
+  local group_data_file="$5"
+
   local dt_file dt_display
   dt_file=$(date '+%Y-%m-%d_%I%M%p' | tr '[:upper:]' '[:lower:]')
   dt_display=$(date '+%Y-%m-%d  %I:%M %p')
   local report_file="$REPORT_DIR/${dt_file}_bintxt-tool_compare_report.txt"
 
-  local total_pairs=$(( matched + mismatched + errors ))
-  local overall="ALL PAIRS MATCHED"
-  [[ $mismatched -gt 0 || $errors -gt 0 ]] && overall="COMPLETED WITH DIFFERENCES"
-  [[ $unpaired -gt 0 ]] && overall="${overall} + ${unpaired} UNPAIRED FILE(S)"
+  local overall="ALL FILES UNIQUE"
+  [[ $n_groups -gt 0 ]] && overall="${n_groups} MATCH GROUP(S) FOUND"
 
   {
     echo "============================================================"
@@ -255,44 +226,18 @@ write_report() {
     echo "  Word layout : ${LAYOUT_LABEL}  (${#WORD_SIZES[@]} word(s), ${STRIDE}B stride)"
     echo "  Byte order  : $ENDIAN-endian"
     echo "  Input dir   : $INPUT_DIR"
-    echo "  Output dir  : $OUTPUT_DIR  (reviewed pairs moved here)"
+    echo "  Output dir  : $OUTPUT_DIR  (reviewed files moved here)"
     echo "  Report dir  : $REPORT_DIR"
     echo
     echo "  Summary"
     echo "  -------"
-    echo "  Pairs compared : $total_pairs"
-    echo "  Matched        : $matched"
-    echo "  Mismatched     : $mismatched"
-    echo "  Errors         : $errors"
-    echo "  Unpaired files : $unpaired  (left in input/ untouched)"
-    echo "  Status         : $overall"
+    echo "  Files processed  : $n_total"
+    echo "  Match groups     : $n_groups  (2+ files with identical content)"
+    echo "  Unique files     : $n_singletons  (no match found)"
+    echo "  Errors           : $n_errors  (left in input/ untouched)"
+    echo "  Status           : $overall"
     echo
-    echo "============================================================"
-    echo "  PAIR RESULTS"
-    echo "============================================================"
-    echo
-
-    local i=1
-    for entry in "${COMPARE_ENTRIES[@]}"; do
-      printf "  [%d]\n" "$i"
-      echo "$entry"
-      echo
-      (( i++ ))
-    done
-
-    if [[ ${#UNPAIRED[@]} -gt 0 ]]; then
-      echo "============================================================"
-      echo "  UNPAIRED FILES  (no matching counterpart — left in input/)"
-      echo "============================================================"
-      echo
-      for f in "${UNPAIRED[@]}"; do
-        echo "  $f"
-      done
-      echo
-      echo "  Each .bin requires a matching .txt with the same base name"
-      echo "  and vice versa. Add the missing counterpart and re-run."
-    fi
-
+    cat "$group_data_file"
     echo
     echo "============================================================"
     echo "  END OF REPORT  —  bintxt_tool  (${LAYOUT_LABEL}, ENDIAN=${ENDIAN})"
@@ -309,113 +254,186 @@ main() {
 
   echo -e "\n${BOLD}${BLUE}bintxt_tool  —  COMPARE${NC}  (layout: ${LAYOUT_LABEL} · endian: ${ENDIAN})"
   echo -e "  Input:   ${CYAN}$INPUT_DIR${NC}"
-  echo -e "  Output:  ${CYAN}$OUTPUT_DIR${NC}  (reviewed pairs moved here)"
+  echo -e "  Output:  ${CYAN}$OUTPUT_DIR${NC}  (reviewed files moved here)"
   echo -e "  Reports: ${CYAN}$REPORT_DIR${NC}"
 
-  # ── Inventory input/ ────────────────────────────────────────────────────────
-  declare -A bin_map txt_map   # base → full path
-
+  # ── Collect all input files ─────────────────────────────────────────────────
+  local all_files=()
   while IFS= read -r -d '' f; do
-    local fname; fname="$(basename "$f")"
-    local ext="${fname##*.}"
-    local base="${fname%.*}"
-    case "${ext,,}" in
-      bin) bin_map["$base"]="$f" ;;
-      txt) txt_map["$base"]="$f" ;;
-    esac
+    all_files+=("$f")
   done < <(find "$INPUT_DIR" -maxdepth 1 -type f \( -iname "*.bin" -o -iname "*.txt" \) -print0 | sort -z)
 
-  if [[ ${#bin_map[@]} -eq 0 && ${#txt_map[@]} -eq 0 ]]; then
+  if [[ ${#all_files[@]} -eq 0 ]]; then
     warn "No .bin or .txt files found in input/"
     echo
     sleep 5
     exit 0
   fi
 
-  # ── Find pairs and unpaired files ───────────────────────────────────────────
-  local pairs=()
-  for base in $(echo "${!bin_map[@]}" | tr ' ' '\n' | sort); do
-    if [[ -n "${txt_map[$base]:-}" ]]; then
-      pairs+=("$base")
+  echo -e "  Found:   ${BOLD}${#all_files[@]}${NC} file(s) to fingerprint\n"
+
+  # ── Fingerprint every file ─────────────────────────────────────────────────
+  header "Fingerprinting ${#all_files[@]} file(s)…"
+
+  # Parallel arrays: file path, content hash, file type, error
+  local fp_paths=() fp_hashes=() fp_types=() fp_errors=()
+
+  for f in "${all_files[@]}"; do
+    local fname; fname="$(basename "$f")"
+    local ext="${fname##*.}"
+    local type_label
+    [[ "${ext,,}" == "bin" ]] && type_label="BINARY" || type_label="TEXT  "
+
+    echo
+    log "${CYAN}${type_label}${NC}  $fname"
+
+    if fingerprint_file "$f"; then
+      fp_paths+=("$f")
+      fp_hashes+=("$FP_HASH")
+      fp_types+=("$type_label")
+      fp_errors+=("")
+      log "         Content hash: ${FP_HASH:0:20}…"
+      ok "Fingerprinted"
     else
-      UNPAIRED+=("${base}.bin  (no matching .txt)")
+      fp_paths+=("$f")
+      fp_hashes+=("ERROR")
+      fp_types+=("$type_label")
+      fp_errors+=("$FP_ERROR")
+      err "Failed: $FP_ERROR  (left in input/)"
     fi
   done
-  for base in $(echo "${!txt_map[@]}" | tr ' ' '\n' | sort); do
-    if [[ -z "${bin_map[$base]:-}" ]]; then
-      UNPAIRED+=("${base}.txt  (no matching .bin)")
+
+  # ── Group by content hash ──────────────────────────────────────────────────
+  header "Grouping by content…"
+
+  # Use Python to do the grouping cleanly
+  local group_data_file="$TEMP_DIR/group_data.txt"
+
+  python3 - "$group_data_file" "${fp_hashes[@]}" "---PATHS---" "${fp_paths[@]}" "---TYPES---" "${fp_types[@]}" "---ERRORS---" "${fp_errors[@]}" <<'PYEOF'
+import sys, collections
+
+args = sys.argv[1:]
+out_file = args[0]
+args = args[1:]
+
+sep_p = args.index("---PATHS---")
+sep_t = args.index("---TYPES---")
+sep_e = args.index("---ERRORS---")
+
+hashes = args[:sep_p]
+paths  = args[sep_p+1:sep_t]
+types  = args[sep_t+1:sep_e]
+errors = args[sep_e+1:]
+
+import os
+
+# Build groups: hash → list of (path, type)
+groups = collections.defaultdict(list)
+error_files = []
+
+for h, p, t, e in zip(hashes, paths, types, errors):
+    fname = os.path.basename(p)
+    if h == "ERROR":
+        error_files.append((fname, t.strip(), e))
+    else:
+        groups[h].append((fname, t.strip(), h))
+
+# Sort groups: multi-file first (matches), then singletons
+matches   = {h: v for h, v in groups.items() if len(v) >= 2}
+singletons = {h: v for h, v in groups.items() if len(v) == 1}
+
+lines = []
+
+if matches:
+    lines.append("============================================================")
+    lines.append("  MATCH GROUPS")
+    lines.append("============================================================")
+    lines.append("")
+    for i, (h, members) in enumerate(sorted(matches.items(), key=lambda x: -len(x[1])), 1):
+        lines.append(f"  GROUP {i}  —  {len(members)} files  (content hash: {h[:20]}…)")
+        for fname, ftype, _ in sorted(members):
+            lines.append(f"    [{ftype}]  {fname}")
+        lines.append("")
+
+if singletons:
+    lines.append("============================================================")
+    lines.append("  UNIQUE FILES  (no match found)")
+    lines.append("============================================================")
+    lines.append("")
+    for h, members in sorted(singletons.items()):
+        fname, ftype, _ = members[0]
+        lines.append(f"    [{ftype}]  {fname}  (hash: {h[:20]}…)")
+    lines.append("")
+
+if error_files:
+    lines.append("============================================================")
+    lines.append("  ERRORS  (could not fingerprint — left in input/)")
+    lines.append("============================================================")
+    lines.append("")
+    for fname, ftype, e in error_files:
+        lines.append(f"    [{ftype}]  {fname}  —  {e}")
+    lines.append("")
+
+# Write counts as first line for bash to read back
+n_groups    = len(matches)
+n_singletons = len(singletons)
+n_errors    = len(error_files)
+
+with open(out_file, 'w') as f:
+    f.write(f"COUNTS {n_groups} {n_singletons} {n_errors}\n")
+    f.write('\n'.join(lines) + '\n')
+PYEOF
+
+  # Read counts back from first line
+  local count_line
+  count_line=$(head -1 "$group_data_file")
+  local n_groups n_singletons n_errors
+  read -r _ n_groups n_singletons n_errors <<< "$count_line"
+  # Strip the counts line from the data file
+  local clean_group_file="$TEMP_DIR/group_data_clean.txt"
+  tail -n +2 "$group_data_file" > "$clean_group_file"
+
+  # Print groups to terminal
+  cat "$clean_group_file"
+
+  # ── Move reviewed files to output/ ─────────────────────────────────────────
+  header "Moving reviewed files to output/…"
+  local moved=0
+  for i in "${!fp_hashes[@]}"; do
+    if [[ "${fp_hashes[$i]}" != "ERROR" ]]; then
+      local fname; fname="$(basename "${fp_paths[$i]}")"
+      mv "${fp_paths[$i]}" "$OUTPUT_DIR/${fname}"
+      log "  ${CYAN}${fname}${NC}"
+      (( moved++ )) || true
     fi
   done
-
-  if [[ ${#pairs[@]} -eq 0 ]]; then
-    warn "No complete .bin/.txt pairs found in input/"
-    if [[ ${#UNPAIRED[@]} -gt 0 ]]; then
-      log "Unpaired files (need a matching counterpart):"
-      for f in "${UNPAIRED[@]}"; do
-        log "  ${YELLOW}${f}${NC}"
-      done
-    fi
-    echo
-    sleep 5
-    exit 1
-  fi
-
-  # ── Report unpaired files upfront ───────────────────────────────────────────
-  if [[ ${#UNPAIRED[@]} -gt 0 ]]; then
-    echo
-    warn "${#UNPAIRED[@]} unpaired file(s) found — will be left in input/ untouched:"
-    for f in "${UNPAIRED[@]}"; do
-      log "  ${YELLOW}${f}${NC}"
-    done
-  fi
-
-  # ── Compare each pair ───────────────────────────────────────────────────────
-  header "Comparing ${#pairs[@]} pair(s)…"
-
-  local matched=0 mismatched=0 errors=0
-
-  for base in "${pairs[@]}"; do
-    echo
-    if compare_pair "${bin_map[$base]}" "${txt_map[$base]}"; then
-      (( matched++ )) || true
-    else
-      # distinguish errors vs mismatches
-      if echo "${COMPARE_ENTRIES[-1]}" | grep -q "ERROR"; then
-        (( errors++ )) || true
-      else
-        (( mismatched++ )) || true
-      fi
-    fi
-  done
+  log "${moved} file(s) moved to output/"
 
   # ── Write report ────────────────────────────────────────────────────────────
   echo
   header "Writing compare report…"
+  local n_processed=$(( ${#all_files[@]} - n_errors ))
   local rpt
-  rpt=$(write_report "$matched" "$mismatched" "$errors" "${#UNPAIRED[@]}")
+  rpt=$(write_report "$n_groups" "$n_singletons" "$n_errors" "$n_processed" "$clean_group_file")
   ok "Compare report: ${CYAN}$(basename "$rpt")${NC}"
 
   # ── Summary ─────────────────────────────────────────────────────────────────
-  local total_pairs=$(( matched + mismatched + errors ))
   echo
   echo -e "${BOLD}─────────────────────────────────────${NC}"
-  echo -e "  ${GREEN}Matched: $matched${NC}  |  ${RED}Mismatched: $mismatched${NC}  |  Pairs: $total_pairs"
-  if [[ ${#UNPAIRED[@]} -gt 0 ]]; then
-    echo -e "  ${YELLOW}Unpaired: ${#UNPAIRED[@]}${NC}  (left in input/ — add counterpart to compare)"
-  fi
-  echo -e "  Reviewed pairs moved to ${CYAN}output/${NC}"
+  echo -e "  ${BOLD}Files:${NC} ${#all_files[@]}  |  ${GREEN}Groups: $n_groups${NC}  |  Unique: $n_singletons  |  ${RED}Errors: $n_errors${NC}"
+  echo -e "  Reviewed files moved to ${CYAN}output/${NC}"
   echo -e "${BOLD}─────────────────────────────────────${NC}"
 
-  if [[ $mismatched -gt 0 || $errors -gt 0 ]]; then
-    echo -e "\n  ${RED}Differences found — see compare report for details.${NC}"
-  elif [[ $matched -gt 0 ]]; then
-    echo -e "\n  ${GREEN}All pairs match.${NC}"
+  if [[ $n_groups -gt 0 ]]; then
+    echo -e "\n  ${GREEN}${n_groups} match group(s) found — see report for details.${NC}"
+  elif [[ $n_errors -eq 0 ]]; then
+    echo -e "\n  All files are unique — no content matches."
   fi
 
   echo -e "\n  ${YELLOW}Closing in 5 seconds…${NC}"
   sleep 5
 
-  [[ $mismatched -eq 0 && $errors -eq 0 ]]
+  [[ $n_errors -eq 0 ]]
 }
 
 trap 'rm -rf "$TEMP_DIR"' EXIT
