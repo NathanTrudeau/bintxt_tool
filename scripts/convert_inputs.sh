@@ -22,11 +22,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ─── Load config ─────────────────────────────────────────────────────────────
 
-if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
-  source "$SCRIPT_DIR/config.sh"
+if [[ -f "$REPO_DIR/cfg/config.sh" ]]; then
+  source "$REPO_DIR/cfg/config.sh"
 else
   ENDIAN="little"
   WORD_SIZES=(4)
@@ -40,9 +41,9 @@ if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
   WORD_SIZES=("$WORD_SIZE")
 fi
 
-INPUT_DIR="$SCRIPT_DIR/$INPUT_DIR"
-OUTPUT_DIR="$SCRIPT_DIR/$OUTPUT_DIR"
-REPORT_DIR="$SCRIPT_DIR/$REPORT_DIR"
+INPUT_DIR="$REPO_DIR/$INPUT_DIR"
+OUTPUT_DIR="$REPO_DIR/$OUTPUT_DIR"
+REPORT_DIR="$REPO_DIR/$REPORT_DIR"
 TEMP_DIR="$(mktemp -d)"
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$REPORT_DIR"
@@ -631,7 +632,7 @@ main() {
   else
     echo -e "\n  ${GREEN}All conversions verified successfully.${NC}"
     if [[ ${#bin_files[@]} -gt 0 ]]; then
-      echo -e "  To edit and re-apply a .txt, run ${CYAN}./edit_inputs.sh${NC} for the DRAFT review flow."
+      echo -e "  To edit and re-apply a .txt, run ${CYAN}./scripts/edit_inputs.sh${NC} for the DRAFT review flow."
     fi
   fi
 

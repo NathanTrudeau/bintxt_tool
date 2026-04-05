@@ -22,7 +22,7 @@ Built for teams that need to **read, diff, and version-control binary files** wi
 git clone https://github.com/NathanTrudeau/bintxt_tool.git
 cd bintxt_tool
 
-# (Optional) edit config.sh to match your binary format
+# (Optional) edit cfg/config.sh to match your binary format
 # Drop files into input/ and run the appropriate script
 ```
 
@@ -38,7 +38,7 @@ Converts everything in `input/` in one pass. No prompts.
 ```
 
 ```bash
-./convert_inputs.sh
+./scripts/convert_inputs.sh
 ```
 
 - Both directions run automatically
@@ -54,7 +54,7 @@ Two-step draft workflow. Review before anything becomes a binary.
 
 **Step 1 — Create drafts:**
 ```bash
-./edit_inputs.sh
+./scripts/edit_inputs.sh
 ```
 - `.bin` files → extracted to `output/__DRAFT_name.txt`
 - `.txt` files → format-checked, normalized → `output/__DRAFT_name.txt`
@@ -62,7 +62,7 @@ Two-step draft workflow. Review before anything becomes a binary.
 
 **Step 2 — Apply drafts to binary:**
 ```bash
-./edit_inputs.sh apply
+./scripts/edit_inputs.sh apply
 ```
 - All `__DRAFT_*.txt` files in `output/` are converted to `.bin`
 - `__DRAFT_` copy is removed on success
@@ -82,7 +82,7 @@ Both binaries are produced independently so you can diff them.
 Verifies that `.bin`/`.txt` pairs contain identical data.
 
 ```bash
-./compare_inputs.sh
+./scripts/compare_inputs.sh
 ```
 
 - **Strict pairing required** — every `.bin` must have a `.txt` with the same base name, and vice versa

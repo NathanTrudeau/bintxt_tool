@@ -2,7 +2,7 @@
 # =============================================================================
 # compare_inputs.sh — Binary ↔ Text pair comparison (COMPARE)
 #
-# Usage:  ./compare_inputs.sh
+# Usage:  ./scripts/compare_inputs.sh
 #
 # Place matching .bin/.txt pairs in ./input/ — every .bin must have a .txt
 # with the exact same base name, and vice versa. Unpaired files are flagged
@@ -24,11 +24,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ─── Load config ─────────────────────────────────────────────────────────────
 
-if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
-  source "$SCRIPT_DIR/config.sh"
+if [[ -f "$REPO_DIR/cfg/config.sh" ]]; then
+  source "$REPO_DIR/cfg/config.sh"
 else
   ENDIAN="little"
   WORD_SIZES=(4)
@@ -42,9 +43,9 @@ if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
   WORD_SIZES=("$WORD_SIZE")
 fi
 
-INPUT_DIR="$SCRIPT_DIR/$INPUT_DIR"
-OUTPUT_DIR="$SCRIPT_DIR/$OUTPUT_DIR"
-REPORT_DIR="$SCRIPT_DIR/$REPORT_DIR"
+INPUT_DIR="$REPO_DIR/$INPUT_DIR"
+OUTPUT_DIR="$REPO_DIR/$OUTPUT_DIR"
+REPORT_DIR="$REPO_DIR/$REPORT_DIR"
 TEMP_DIR="$(mktemp -d)"
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$REPORT_DIR"
