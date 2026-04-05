@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -29,7 +29,7 @@ BG       = "#181818"
 SURFACE  = "#212121"
 SURFACE2 = "#282828"
 BORDER   = "#444444"
-BORDER_S = "#333333"
+BORDER_S = "#383838"
 FG       = "#d4d4d4"
 FG_DIM   = "#6a6a6a"
 FG_MED   = "#909090"
@@ -60,11 +60,14 @@ def _ensure_dirs(cfg):
     for k in ("input_dir", "output_dir", "report_dir"):
         Path(cfg[k]).mkdir(parents=True, exist_ok=True)
 
-def _border(parent, thick=1, color=BORDER):
+def _border_h(parent, thick=1, color=BORDER):
     return tk.Frame(parent, bg=color, height=thick)
 
-def _vborder(parent, thick=1, color=BORDER):
+def _border_v(parent, thick=1, color=BORDER):
     return tk.Frame(parent, bg=color, width=thick)
+
+def _dt_tag():
+    return datetime.now().strftime("%Y-%m-%d_%I%M%p").lower()
 
 
 class BintxtApp(tk.Tk):
@@ -80,7 +83,9 @@ class BintxtApp(tk.Tk):
         self._sel_output = None
         self._input_files  = []
         self._output_files = []
+        self._undo_stack   = []   # list of {"files": [(Path, bytes)], "desc": str}
 
+        self._apply_scrollbar_style()
         self._build()
         self._refresh_all()
 
@@ -90,15 +95,42 @@ class BintxtApp(tk.Tk):
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
 
+    # ── Scrollbar style ───────────────────────────────────────────────────────
+
+    def _apply_scrollbar_style(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        for orient in ("Vertical", "Horizontal"):
+            style.configure(
+                f"Dark.{orient}.TScrollbar",
+                background=BORDER_S,
+                troughcolor=SURFACE,
+                arrowcolor=FG_DIM,
+                bordercolor=SURFACE,
+                lightcolor=SURFACE,
+                darkcolor=SURFACE,
+                gripcount=0,
+            )
+            style.map(
+                f"Dark.{orient}.TScrollbar",
+                background=[("active", BORDER), ("pressed", ACCENT)],
+            )
+
+    def _vscroll(self, parent):
+        return ttk.Scrollbar(parent, orient="vertical",   style="Dark.Vertical.TScrollbar")
+
+    def _hscroll(self, parent):
+        return ttk.Scrollbar(parent, orient="horizontal", style="Dark.Horizontal.TScrollbar")
+
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build(self):
         self._build_header()
-        _border(self, thick=1, color=BORDER).pack(fill="x")
+        _border_h(self, thick=1, color=BORDER).pack(fill="x")
         self._build_toolbar()
-        _border(self, thick=2, color=BORDER).pack(fill="x")
+        _border_h(self, thick=2, color=BORDER).pack(fill="x")
         self._build_body()
-        _border(self, thick=1, color=BORDER).pack(fill="x")
+        _border_h(self, thick=1, color=BORDER).pack(fill="x")
         self._build_statusbar()
 
     def _build_header(self):
@@ -118,6 +150,7 @@ class BintxtApp(tk.Tk):
         bar.pack(fill="x")
         bar.pack_propagate(False)
 
+        # Left: Actions
         tk.Label(bar, text="Actions", bg=SURFACE2, fg=FG_DIM,
                  font=UI_SB).pack(side="left", padx=(14, 6), pady=10)
 
@@ -128,50 +161,45 @@ class BintxtApp(tk.Tk):
             ("Compare",      self._run_compare, False),
         ]:
             bg = BTN_ACT if primary else BTN_BG
-            self._tbtn(bar, label, cmd, bg=bg).pack(side="left", padx=3, pady=7)
+            self._tbtn(bar, label, cmd, bg=bg).pack(side="left", padx=3, pady=6)
 
-        _vborder(bar, thick=1, color=BORDER_S).pack(side="left", fill="y", padx=10, pady=8)
-        self._tbtn(bar, "📦  Package", self._run_package).pack(side="left", padx=3, pady=7)
-        self._tbtn(bar, "💾  Save Log", self._save_log).pack(side="left", padx=3, pady=7)
+        # Right: Save Log + Package (right-justified)
+        self._tbtn(bar, "📦  Package",  self._run_package).pack(side="right", padx=(3, 12), pady=6)
+        self._tbtn(bar, "💾  Save Log", self._save_log).pack(side="right", padx=3, pady=6)
+        _border_v(bar, thick=1, color=BORDER_S).pack(side="right", fill="y", padx=6, pady=8)
 
     def _build_body(self):
-        # Three-pane resizable layout: [files] | [viewer] | [log]
         paned = tk.PanedWindow(self, orient="horizontal",
-                               bg=BORDER, sashwidth=3,
+                               bg=BORDER, sashwidth=4,
                                sashrelief="flat", opaqueresize=True)
         paned.pack(fill="both", expand=True)
 
-        # ── Left: file panels ─────────────────────────────────────────────────
         left = tk.Frame(paned, bg=BG)
         paned.add(left, minsize=200, width=240)
 
-        # Input / Output split vertically
         vpaned = tk.PanedWindow(left, orient="vertical",
-                                bg=BORDER, sashwidth=3,
+                                bg=BORDER, sashwidth=4,
                                 sashrelief="flat", opaqueresize=True)
         vpaned.pack(fill="both", expand=True)
 
         inp_frame = tk.Frame(vpaned, bg=BG)
         vpaned.add(inp_frame, minsize=120)
-
         out_frame = tk.Frame(vpaned, bg=BG)
         vpaned.add(out_frame, minsize=120)
 
         self._build_file_panel(inp_frame, "INPUT",  is_input=True)
         self._build_file_panel(out_frame, "OUTPUT", is_input=False)
 
-        # ── Center: viewer ────────────────────────────────────────────────────
         center = tk.Frame(paned, bg=BG)
         paned.add(center, minsize=300)
         self._build_viewer(center)
 
-        # ── Right: log ────────────────────────────────────────────────────────
         right = tk.Frame(paned, bg=BG)
         paned.add(right, minsize=200, width=280)
         self._build_log_panel(right)
 
     def _build_file_panel(self, parent, title, is_input):
-        # Header row
+        # Header
         hdr = tk.Frame(parent, bg=SURFACE2, height=28)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
@@ -179,17 +207,18 @@ class BintxtApp(tk.Tk):
                  font=UI_SB).pack(side="left", pady=4)
 
         if is_input:
-            self._sbtn(hdr, "Add", self._browse_files).pack(side="right", padx=(0, 4), pady=4)
+            self._sbtn(hdr, "Add", self._browse_files).pack(side="right", padx=(0, 6), pady=4)
+        else:
+            self._sbtn(hdr, "Move to Input", self._move_to_input).pack(side="right", padx=(0, 6), pady=4)
 
-        _border(parent, thick=2, color=BORDER).pack(fill="x")
+        _border_h(parent, thick=2, color=BORDER).pack(fill="x")
 
-        # Listbox (multi-select)
+        # Listbox
         box_frame = tk.Frame(parent, bg=SURFACE)
         box_frame.pack(fill="both", expand=True)
 
-        sb = tk.Scrollbar(box_frame, bg=SURFACE2, troughcolor=SURFACE2,
-                          activebackground=BORDER, width=8, relief="flat")
-        sb.pack(side="right", fill="y")
+        sb = self._vscroll(box_frame)
+        sb.pack(side="right", fill="y", padx=(0, 2), pady=2)
 
         lb = tk.Listbox(
             box_frame,
@@ -199,25 +228,29 @@ class BintxtApp(tk.Tk):
             activestyle="none", yscrollcommand=sb.set,
             selectmode="extended",
         )
-        lb.pack(fill="both", expand=True, padx=(4, 0))
+        lb.pack(fill="both", expand=True, padx=(4, 0), pady=2)
         sb.config(command=lb.yview)
 
-        # Action buttons row below the listbox
-        act = tk.Frame(parent, bg=SURFACE2)
+        # Action row
+        _border_h(parent, thick=1, color=BORDER_S).pack(fill="x")
+        act = tk.Frame(parent, bg=SURFACE2, height=28)
         act.pack(fill="x")
-        _border(parent, thick=1, color=BORDER_S).pack(fill="x")
+        act.pack_propagate(False)
 
         if is_input:
             self._input_lb = lb
             lb.bind("<<ListboxSelect>>", self._on_input_select)
-            self._sbtn(act, "Clear Selected", lambda: self._clear_selected(input=True),  danger=True).pack(side="left", padx=4, pady=4)
+            self._sbtn(act, "Clear Selected", lambda: self._clear_selected(inp=True),  danger=True).pack(side="left", padx=(6, 3), pady=4)
             self._sbtn(act, "Clear All",      self._clear_input, danger=True).pack(side="left", pady=4)
+            self._undo_btn_input = self._sbtn(act, "Undo", lambda: self._undo(inp=True))
+            self._undo_btn_input.pack(side="right", padx=(0, 6), pady=4)
         else:
             self._output_lb = lb
             lb.bind("<<ListboxSelect>>", self._on_output_select)
-            self._sbtn(act, "Move to Input",  self._move_to_input).pack(side="left", padx=4, pady=4)
-            self._sbtn(act, "Clear Selected", lambda: self._clear_selected(input=False), danger=True).pack(side="left", pady=4)
-            self._sbtn(act, "Clear All",      self._clear_output, danger=True).pack(side="left", padx=4, pady=4)
+            self._sbtn(act, "Clear Selected", lambda: self._clear_selected(inp=False), danger=True).pack(side="left", padx=(6, 3), pady=4)
+            self._sbtn(act, "Clear All",      self._clear_output, danger=True).pack(side="left", pady=4)
+            self._undo_btn_output = self._sbtn(act, "Undo", lambda: self._undo(inp=False))
+            self._undo_btn_output.pack(side="right", padx=(0, 6), pady=4)
 
     def _build_viewer(self, parent):
         vhdr = tk.Frame(parent, bg=SURFACE2, height=28)
@@ -232,17 +265,15 @@ class BintxtApp(tk.Tk):
         tk.Label(vhdr, textvariable=self._viewer_info, bg=SURFACE2, fg=FG_DIM,
                  font=UI_S).pack(side="right", padx=10)
 
-        _border(parent, thick=2, color=BORDER).pack(fill="x")
+        _border_h(parent, thick=2, color=BORDER).pack(fill="x")
 
         frame = tk.Frame(parent, bg=BG)
         frame.pack(fill="both", expand=True)
 
-        vsb = tk.Scrollbar(frame, bg=SURFACE2, troughcolor=SURFACE2,
-                           activebackground=BORDER, width=8, relief="flat")
-        vsb.pack(side="right", fill="y")
-        hsb = tk.Scrollbar(frame, orient="horizontal", bg=SURFACE2, troughcolor=SURFACE2,
-                           activebackground=BORDER, width=8, relief="flat")
-        hsb.pack(side="bottom", fill="x")
+        vsb = self._vscroll(frame)
+        vsb.pack(side="right", fill="y", padx=(0, 2), pady=2)
+        hsb = self._hscroll(frame)
+        hsb.pack(side="bottom", fill="x", padx=2, pady=(0, 2))
 
         self._viewer = tk.Text(
             frame, bg=BG, fg=FG, font=MONO,
@@ -254,9 +285,9 @@ class BintxtApp(tk.Tk):
         vsb.config(command=self._viewer.yview)
         hsb.config(command=self._viewer.xview)
 
-        self._viewer.tag_configure("addr",  foreground=FG_DIM)
-        self._viewer.tag_configure("val",   foreground=CYAN)
-        self._viewer.tag_configure("note",  foreground=FG_DIM, font=UI_S)
+        self._viewer.tag_configure("addr", foreground=FG_DIM)
+        self._viewer.tag_configure("val",  foreground=CYAN)
+        self._viewer.tag_configure("note", foreground=FG_DIM, font=UI_S)
 
     def _build_log_panel(self, parent):
         hdr = tk.Frame(parent, bg=SURFACE2, height=28)
@@ -264,16 +295,15 @@ class BintxtApp(tk.Tk):
         hdr.pack_propagate(False)
         tk.Label(hdr, text="  LOG", bg=SURFACE2, fg=FG_MED,
                  font=UI_SB).pack(side="left", pady=4)
-        self._sbtn(hdr, "Clear", self._clear_log).pack(side="right", padx=(0, 4), pady=4)
+        self._sbtn(hdr, "Clear", self._clear_log).pack(side="right", padx=(0, 6), pady=4)
 
-        _border(parent, thick=2, color=BORDER).pack(fill="x")
+        _border_h(parent, thick=2, color=BORDER).pack(fill="x")
 
         frame = tk.Frame(parent, bg=SURFACE)
         frame.pack(fill="both", expand=True)
 
-        lsb = tk.Scrollbar(frame, bg=SURFACE2, troughcolor=SURFACE2,
-                           activebackground=BORDER, width=8, relief="flat")
-        lsb.pack(side="right", fill="y")
+        lsb = self._vscroll(frame)
+        lsb.pack(side="right", fill="y", padx=(0, 2), pady=2)
 
         self._log = tk.Text(
             frame, bg=SURFACE, fg=FG, font=MONO_S,
@@ -294,25 +324,27 @@ class BintxtApp(tk.Tk):
         bar = tk.Frame(self, bg=SURFACE2, height=26)
         bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
-
         self._status_var = tk.StringVar(value="Ready")
         tk.Label(bar, textvariable=self._status_var, bg=SURFACE2, fg=FG_DIM,
                  font=UI_S).pack(side="left", padx=12)
-
         self._sbtn(bar, "Open output/", self._open_output).pack(side="right", padx=8, pady=3)
 
     # ── Widget factories ──────────────────────────────────────────────────────
 
     def _tbtn(self, parent, text, cmd, bg=BTN_BG):
-        b = tk.Button(parent, text=text, command=cmd,
+        """Toolbar button with 1px border frame."""
+        wrap = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
+        b = tk.Button(wrap, text=text, command=cmd,
                       bg=bg, fg=FG, activebackground=BTN_HOV, activeforeground=FG,
                       font=UI, relief="flat", borderwidth=0,
-                      padx=12, pady=3, cursor="hand2")
+                      padx=11, pady=2, cursor="hand2")
+        b.pack()
         b.bind("<Enter>", lambda _: b.configure(bg=BTN_HOV))
         b.bind("<Leave>", lambda _: b.configure(bg=bg))
-        return b
+        return wrap
 
     def _sbtn(self, parent, text, cmd, danger=False):
+        """Small secondary button."""
         bg  = "#3a1f1f" if danger else BTN_BG
         hov = "#4a2828" if danger else BTN_HOV
         fg  = RED if danger else FG_MED
@@ -333,12 +365,12 @@ class BintxtApp(tk.Tk):
         self._log.configure(state="disabled")
 
     def log(self, m):      self._lw(f"  {m}")
-    def log_ok(self, m):   self._lw(f"  ✓  {m}", "ok")
-    def log_err(self, m):  self._lw(f"  ✗  {m}", "err")
-    def log_warn(self, m): self._lw(f"  ⚠  {m}", "warn")
-    def log_info(self, m): self._lw(f"  →  {m}", "info")
+    def log_ok(self, m):   self._lw(f"  OK   {m}", "ok")
+    def log_err(self, m):  self._lw(f"  FAIL {m}", "err")
+    def log_warn(self, m): self._lw(f"  WARN {m}", "warn")
+    def log_info(self, m): self._lw(f"  -->  {m}", "info")
     def log_head(self, m): self._lw(f"\n{m}", "head")
-    def log_dim(self, m):  self._lw(f"     {m}", "dim")
+    def log_dim(self, m):  self._lw(f"       {m}", "dim")
 
     def _clear_log(self):
         self._log.configure(state="normal")
@@ -346,17 +378,36 @@ class BintxtApp(tk.Tk):
         self._log.configure(state="disabled")
 
     def _save_log(self):
-        path = filedialog.asksaveasfilename(
-            title="Save log as…",
-            initialfile=f"bintxt_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            defaultextension=".txt",
-            filetypes=[("Text file", "*.txt"), ("All files", "*.*")]
-        )
-        if not path:
-            return
-        content = self._log.get("1.0", "end")
-        Path(path).write_text(content, encoding="utf-8")
-        self.log_ok(f"Log saved: {path}")
+        """Save log to reports/ with standard naming convention."""
+        cfg = _cfg(); _ensure_dirs(cfg)
+        report_dir = Path(cfg["report_dir"])
+        filename   = f"{_dt_tag()}_bintxt-tool_ui-session-log.txt"
+        path       = report_dir / filename
+
+        raw = self._log.get("1.0", "end")
+
+        # Build formatted report (plain text, UI-log style)
+        lines = [
+            "============================================================",
+            "  BINTXT_TOOL — UI SESSION LOG",
+            f"  Generated : {datetime.now().strftime('%Y-%m-%d  %I:%M %p')}",
+            "============================================================",
+            "",
+        ]
+        # Strip unicode symbols for safe cross-platform reading
+        # (keep original in UI, write sanitized to file)
+        for line in raw.splitlines():
+            lines.append(line)
+
+        lines += [
+            "",
+            "============================================================",
+            "  END OF LOG",
+            "============================================================",
+        ]
+
+        path.write_text("\n".join(lines), encoding="utf-8")
+        self.log_ok(f"Log saved: {filename}")
 
     def _set_status(self, msg):
         self._status_var.set(msg)
@@ -417,6 +468,7 @@ class BintxtApp(tk.Tk):
     def _on_input_select(self, _=None):
         sel = self._input_lb.curselection()
         if sel and self._input_files:
+            # Preview first selected
             f = self._input_files[sel[0]]
             self._sel_input = f
             self._output_lb.selection_clear(0, "end")
@@ -430,44 +482,84 @@ class BintxtApp(tk.Tk):
             self._input_lb.selection_clear(0, "end")
             self._preview(f)
 
-    def _clear_input(self):
+    # ── File operations ───────────────────────────────────────────────────────
+
+    def _files_for_panel(self, inp):
+        return self._input_files if inp else self._output_files
+
+    def _lb_for_panel(self, inp):
+        return self._input_lb if inp else self._output_lb
+
+    def _push_undo(self, files_to_delete, desc):
+        """Read file contents into memory and push to undo stack."""
+        record = {"files": [], "desc": desc, "inp": None}
+        for f in files_to_delete:
+            try:
+                record["files"].append((f, f.read_bytes()))
+            except Exception:
+                pass
+        if record["files"]:
+            self._undo_stack.append(record)
+
+    def _undo(self, inp=True):
+        # Find the most recent undo record for this panel
+        # We track panel by directory
         cfg = _cfg()
-        removed = 0
-        for f in Path(cfg["input_dir"]).iterdir():
-            if f.suffix.lower() in (".bin", ".txt"):
-                f.unlink(); removed += 1
-        self.log_warn(f"Cleared {removed} file(s) from input/")
+        target_dir = Path(cfg["input_dir"]) if inp else Path(cfg["output_dir"])
+
+        # Search stack in reverse for records matching this dir
+        for i in range(len(self._undo_stack) - 1, -1, -1):
+            record = self._undo_stack[i]
+            if record["files"] and Path(record["files"][0][0]).parent == target_dir:
+                restored = 0
+                for path, data in record["files"]:
+                    try:
+                        path.write_bytes(data)
+                        restored += 1
+                    except Exception as e:
+                        self.log_err(f"Undo failed for {path.name}: {e}")
+                self._undo_stack.pop(i)
+                self.log_info(f"Undo: restored {restored} file(s)  [{record['desc']}]")
+                self._refresh_all()
+                return
+        self.log_warn("Nothing to undo")
+
+    def _clear_selected(self, inp=True):
+        lb    = self._lb_for_panel(inp)
+        files = self._files_for_panel(inp)
+        sel   = lb.curselection()
+        if not sel:
+            self.log_warn("No files selected"); return
+
+        to_delete = [files[i] for i in sel if i < len(files)]
+        self._push_undo(to_delete, f"Clear Selected ({len(to_delete)} file(s))")
+
+        for f in to_delete:
+            f.unlink()
+        self.log_warn(f"Deleted {len(to_delete)} file(s)  (Undo to restore)")
+
+        if inp: self._sel_input  = None
+        else:   self._sel_output = None
+        self._clear_viewer()
+        self._refresh_all()
+
+    def _clear_input(self):
+        files = [f for f in Path(_cfg()["input_dir"]).iterdir()
+                 if f.suffix.lower() in (".bin", ".txt")]
+        self._push_undo(files, "Clear All input/")
+        for f in files: f.unlink()
+        self.log_warn(f"Cleared {len(files)} file(s) from input/  (Undo to restore)")
         self._sel_input = None
         self._clear_viewer()
         self._refresh_all()
 
     def _clear_output(self):
-        cfg = _cfg()
-        removed = 0
-        for f in Path(cfg["output_dir"]).iterdir():
-            if f.is_file() and f.suffix.lower() in (".bin", ".txt"):
-                f.unlink(); removed += 1
-        self.log_warn(f"Cleared {removed} file(s) from output/")
+        files = [f for f in Path(_cfg()["output_dir"]).iterdir()
+                 if f.is_file() and f.suffix.lower() in (".bin", ".txt")]
+        self._push_undo(files, "Clear All output/")
+        for f in files: f.unlink()
+        self.log_warn(f"Cleared {len(files)} file(s) from output/  (Undo to restore)")
         self._sel_output = None
-        self._clear_viewer()
-        self._refresh_all()
-
-    def _clear_selected(self, input=True):
-        if input:
-            sel = self._input_lb.curselection()
-            files = self._input_files
-        else:
-            sel = self._output_lb.curselection()
-            files = self._output_files
-        if not sel:
-            self.log_warn("No files selected"); return
-        removed = 0
-        for idx in sel:
-            if idx < len(files):
-                files[idx].unlink(); removed += 1
-        self.log_warn(f"Deleted {removed} selected file(s)")
-        if input:  self._sel_input  = None
-        else:      self._sel_output = None
         self._clear_viewer()
         self._refresh_all()
 
@@ -515,7 +607,7 @@ class BintxtApp(tk.Tk):
                 self._viewer_info.set(f"{path.stat().st_size} B  ·  binary (extracted view)")
             else:
                 content = path.read_text(errors="replace")
-                lines = content.splitlines()
+                lines   = content.splitlines()
                 self._viewer_info.set(f"{path.stat().st_size} B  ·  {len(lines)} lines")
 
             for line in content.splitlines():
@@ -539,7 +631,7 @@ class BintxtApp(tk.Tk):
         import subprocess
         out = Path(_cfg()["output_dir"])
         try:
-            if sys.platform == "win32":   os.startfile(str(out))
+            if sys.platform == "win32":    os.startfile(str(out))
             elif sys.platform == "darwin": subprocess.Popen(["open", str(out)])
             else:                          subprocess.Popen(["xdg-open", str(out)])
         except Exception as e:
@@ -548,7 +640,7 @@ class BintxtApp(tk.Tk):
     # ── Threaded runner ───────────────────────────────────────────────────────
 
     def _run_in_thread(self, fn):
-        self._set_status("Running…")
+        self._set_status("Running...")
         def _wrap():
             try:   fn()
             except Exception as e: self.log_err(f"Unexpected error: {e}")
@@ -585,7 +677,7 @@ class BintxtApp(tk.Tk):
             try:
                 bin_to_txt(str(f), str(dst), endian, ws)
                 ok, h_orig, h_rt = verify_bin_to_txt(str(f), str(dst), endian, ws, tmp)
-                if ok:   self.log_ok(f"{dst.name}  {h_rt[:20]}…"); passed += 1
+                if ok:   self.log_ok(f"{dst.name}  {h_rt[:20]}..."); passed += 1
                 else:    self.log_err(f"{f.name}  roundtrip mismatch"); failed += 1
             except Exception as e:
                 self.log_err(f"{f.name}  {e}"); failed += 1
@@ -598,12 +690,12 @@ class BintxtApp(tk.Tk):
                 if not ok_v: self.log_warn(f"{f.name}  {len(issues)} format issue(s)")
                 txt_to_bin(str(f), str(dst), endian, ws)
                 ok, h_bin, _ = verify_txt_to_bin(str(f), str(dst), endian, ws, tmp)
-                if ok:   self.log_ok(f"{dst.name}  {h_bin[:20]}…"); passed += 1
+                if ok:   self.log_ok(f"{dst.name}  {h_bin[:20]}..."); passed += 1
                 else:    self.log_err(f"{f.name}  roundtrip mismatch"); failed += 1
             except Exception as e:
                 self.log_err(f"{f.name}  {e}"); failed += 1
 
-        self.log_head(f"Done — {passed} passed, {failed} failed")
+        self.log_head(f"Done -- {passed} passed, {failed} failed")
 
     # ── Draft ─────────────────────────────────────────────────────────────────
 
@@ -624,7 +716,7 @@ class BintxtApp(tk.Tk):
         for f in bins:
             stem = f"{f.stem}~bin" if f.stem in conflicts else f.stem
             dst  = out_dir / f"__DRAFT_{stem}.txt"
-            self.log_info(f"BIN  {f.name}  →  {dst.name}")
+            self.log_info(f"BIN  {f.name}  -->  {dst.name}")
             try:
                 bin_to_txt(str(f), str(dst), endian, ws)
                 ok, h_orig, h_rt = verify_bin_to_txt(str(f), str(dst), endian, ws, tmp)
@@ -635,7 +727,7 @@ class BintxtApp(tk.Tk):
         for f in txts:
             stem = f"{f.stem}~txt" if f.stem in conflicts else f.stem
             dst  = out_dir / f"__DRAFT_{stem}.txt"
-            self.log_info(f"TXT  {f.name}  →  {dst.name}")
+            self.log_info(f"TXT  {f.name}  -->  {dst.name}")
             try:
                 ok_v, issues = validate_txt_format(str(f), endian, ws)
                 self.log_ok("Format valid") if ok_v else self.log_warn(f"{len(issues)} issue(s)")
@@ -656,7 +748,7 @@ class BintxtApp(tk.Tk):
 
         drafts = sorted(out_dir.glob("__DRAFT_*.txt"))
         if not drafts:
-            self.log_warn("No __DRAFT_*.txt in output/  —  run Draft first"); return
+            self.log_warn("No __DRAFT_*.txt in output/  --  run Draft first"); return
 
         self.log_head(f"APPLY  ({len(drafts)} draft(s))")
         passed = failed = 0
@@ -664,19 +756,19 @@ class BintxtApp(tk.Tk):
         for f in drafts:
             stem = f.stem[len("__DRAFT_"):]
             dst  = out_dir / f"{stem}.bin"
-            self.log_info(f"{f.name}  →  {dst.name}")
+            self.log_info(f"{f.name}  -->  {dst.name}")
             try:
                 txt_to_bin(str(f), str(dst), endian, ws)
                 ok, h_bin, _ = verify_txt_to_bin(str(f), str(dst), endian, ws, tmp)
                 if ok:
-                    self.log_ok(f"Verified  {h_bin[:20]}…")
+                    self.log_ok(f"Verified  {h_bin[:20]}...")
                     f.unlink(); self.log_dim("DRAFT removed"); passed += 1
                 else:
-                    self.log_err("Roundtrip mismatch — DRAFT kept"); failed += 1
+                    self.log_err("Roundtrip mismatch -- DRAFT kept"); failed += 1
             except Exception as e:
                 self.log_err(f"{f.name}  {e}"); failed += 1
 
-        self.log_head(f"Done — {passed} passed, {failed} failed")
+        self.log_head(f"Done -- {passed} passed, {failed} failed")
 
     # ── Compare ───────────────────────────────────────────────────────────────
 
@@ -699,7 +791,7 @@ class BintxtApp(tk.Tk):
                 self.log_err(f"[{ftype}]  {f.name}  {err}")
                 fp_list.append((str(f), "ERROR", ftype, err))
             else:
-                self.log_dim(f"[{ftype}]  {f.name}  {h[:20]}…")
+                self.log_dim(f"[{ftype}]  {f.name}  {h[:20]}...")
                 fp_list.append((str(f), h, ftype, ""))
 
         matches, singletons, _ = group_by_hash(fp_list)
@@ -707,11 +799,11 @@ class BintxtApp(tk.Tk):
         if matches:
             self.log_head(f"{len(matches)} match group(s):")
             for h, members in sorted(matches.items(), key=lambda x: -len(x[1])):
-                self.log_info(f"Group — {len(members)} files  hash: {h[:16]}…")
+                self.log_info(f"Group -- {len(members)} files  hash: {h[:16]}...")
                 for fname, ftype, _ in sorted(members):
                     self.log_dim(f"  [{ftype}]  {fname}")
         else:
-            self.log_head("All files unique — no matches")
+            self.log_head("All files unique -- no matches")
 
         moved = 0
         for path, h, _, _ in fp_list:
@@ -725,18 +817,10 @@ class BintxtApp(tk.Tk):
 
     def _do_package(self):
         cfg = _cfg()
-        in_dir  = Path(cfg["input_dir"])
         out_dir = Path(cfg["output_dir"])
 
-        # Let user pick exactly which files to include — pre-navigate to output/ then input/
-        candidates = (
-            sorted(out_dir.iterdir(), key=lambda f: f.name) +
-            sorted(in_dir.iterdir(),  key=lambda f: f.name)
-        )
-
-        # Show selection dialog starting in output/
         selected = filedialog.askopenfilenames(
-            title="Select files to package (input/ and output/ shown — navigate freely)",
+            title="Select files to package",
             initialdir=str(out_dir),
             filetypes=[("Binary / Text / All", "*.bin *.txt *.*"), ("All files", "*.*")]
         )
@@ -745,7 +829,7 @@ class BintxtApp(tk.Tk):
 
         default = f"bintxt_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
         save_path = filedialog.asksaveasfilename(
-            title="Save package as…",
+            title="Save package as...",
             initialfile=default,
             defaultextension=".zip",
             filetypes=[("ZIP archive", "*.zip")]
@@ -753,12 +837,11 @@ class BintxtApp(tk.Tk):
         if not save_path:
             return
 
-        self.log_head(f"PACKAGE  →  {Path(save_path).name}")
-
+        self.log_head(f"PACKAGE  -->  {Path(save_path).name}")
         with zipfile.ZipFile(save_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for p in selected:
                 src = Path(p)
-                zf.write(str(src), src.name)   # flat — no folders
+                zf.write(str(src), src.name)
                 self.log_dim(f"  + {src.name}")
 
         self.log_ok(f"Saved: {save_path}  ({len(selected)} files)")
