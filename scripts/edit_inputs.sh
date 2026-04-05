@@ -3,8 +3,8 @@
 # edit_inputs.sh — Review-before-commit DRAFT workflow
 #
 # Usage:
-#   ./edit_inputs.sh           — DRAFT mode
-#   ./edit_inputs.sh apply     — APPLY mode
+#   ./scripts/edit_inputs.sh           — DRAFT mode
+#   ./scripts/edit_inputs.sh apply     — APPLY mode
 #
 # ── DRAFT mode (no args) ──────────────────────────────────────────────────────
 #   Scans input/ for .bin and .txt files and writes DRAFT copies to output/:
@@ -12,7 +12,7 @@
 #     .txt files  → format-verified, normalized → output/__DRAFT_name.txt
 #   Writes a draft report. Exits cleanly. No prompt, no timeout.
 #
-# ── APPLY mode (./edit_inputs.sh apply) ───────────────────────────────────────
+# ── APPLY mode (./scripts/edit_inputs.sh apply) ───────────────────────────────────────
 #   Scans output/ for __DRAFT_*.txt files.
 #   Validates each against config, converts to output/name.bin.
 #   Removes the __DRAFT_ copy on success.
@@ -28,11 +28,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ─── Load config ─────────────────────────────────────────────────────────────
 
-if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
-  source "$SCRIPT_DIR/config.sh"
+if [[ -f "$REPO_DIR/cfg/config.sh" ]]; then
+  source "$REPO_DIR/cfg/config.sh"
 else
   ENDIAN="little"
   WORD_SIZES=(4)
@@ -46,9 +47,9 @@ if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
   WORD_SIZES=("$WORD_SIZE")
 fi
 
-INPUT_DIR="$SCRIPT_DIR/$INPUT_DIR"
-OUTPUT_DIR="$SCRIPT_DIR/$OUTPUT_DIR"
-REPORT_DIR="$SCRIPT_DIR/$REPORT_DIR"
+INPUT_DIR="$REPO_DIR/$INPUT_DIR"
+OUTPUT_DIR="$REPO_DIR/$OUTPUT_DIR"
+REPORT_DIR="$REPO_DIR/$REPORT_DIR"
 TEMP_DIR="$(mktemp -d)"
 
 mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$REPORT_DIR"
@@ -464,7 +465,7 @@ write_draft_report() {
     echo "  Status      : $([ $failed -gt 0 ] && echo "DRAFT WITH ERRORS" || echo "ALL DRAFTED")"
     echo
     echo "  Next step: review __DRAFT_* files in output/, then run:"
-    echo "    ./edit_inputs.sh apply"
+    echo "    ./scripts/edit_inputs.sh apply"
     echo
     echo "============================================================"
     echo "  DRAFT FILES"
@@ -716,7 +717,7 @@ run_draft() {
     echo -e "\n  ${RED}Some drafts had errors — review before applying.${NC}"
   else
     echo -e "\n  ${GREEN}All drafts created.${NC}  Review output/__DRAFT_* then run:"
-    echo -e "  ${CYAN}./edit_inputs.sh apply${NC}"
+    echo -e "  ${CYAN}./scripts/edit_inputs.sh apply${NC}"
   fi
 
   echo -e "\n  ${YELLOW}Closing in 5 seconds…${NC}"
@@ -737,7 +738,7 @@ run_apply() {
 
   if [[ ${#draft_files[@]} -eq 0 ]]; then
     warn "No __DRAFT_*.txt files found in output/"
-    log "Run ${CYAN}./edit_inputs.sh${NC} first to create drafts."
+    log "Run ${CYAN}./scripts/edit_inputs.sh${NC} first to create drafts."
     echo
     sleep 5
     exit 0
