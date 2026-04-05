@@ -8,24 +8,15 @@
 # every file by its normalized binary content, then groups all files that
 # represent identical data — regardless of filename or file type.
 #
-#   bin vs bin  — both extracted, normalized, compared
-#   txt vs txt  — both normalized, compared
-#   bin vs txt  — bin extracted to text, then compared against txt
-#
-# Result: match groups (files with identical content), singletons (no match),
-# and any files that could not be processed (left in input/).
-#
 # All successfully fingerprinted files are moved to output/ as "reviewed".
 # A compare report is written to output/reports/ for every run.
-#
-# Config is the source of truth — all .bin files are extracted using current
-# WORD_SIZES and ENDIAN settings for comparison.
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CORE_COMPARE="$REPO_DIR/core/compare.py"
 
 # ─── Load config ─────────────────────────────────────────────────────────────
 
@@ -74,9 +65,6 @@ header() { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
 check_deps() {
   local missing=()
   command -v python3 &>/dev/null || missing+=("python3")
-  if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
-    missing+=("sha256sum or shasum")
-  fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     err "Missing required tools: ${missing[*]}"
     exit 1
@@ -93,118 +81,10 @@ check_deps() {
   done
 }
 
-sha256() {
-  if command -v sha256sum &>/dev/null; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-
-# ─── BIN → normalized temp txt ───────────────────────────────────────────────
-
-bin_to_txt() {
-  local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
-import sys
-
-src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
-word_sizes = [int(x) for x in sys.argv[4:]]
-stride = sum(word_sizes)
-
-with open(src, 'rb') as f:
-    data = f.read()
-
-lines = []
-offset = 0
-while offset < len(data):
-    parts = [f"{offset:08x}"]
-    cur = offset
-    for ws in word_sizes:
-        chunk = data[cur:cur+ws] if cur + ws <= len(data) else \
-                data[cur:] + b'\x00' * (ws - max(0, len(data) - cur))
-        val = int.from_bytes(chunk[:ws], byteorder=endian)
-        parts.append(f"{val:0{ws*2}x}")
-        cur += ws
-    lines.append(" ".join(parts))
-    offset += stride
-lines.append(f"{offset:08x}")
-
-with open(dst, 'w') as f:
-    f.write('\n'.join(lines) + '\n')
-PYEOF
-}
-
-# ─── Normalize a txt file and write to dst ───────────────────────────────────
-
-normalize_txt() {
-  local src="$1" dst="$2"
-  python3 - "$src" "$dst" <<'PYEOF'
-import sys
-lines_out = []
-for raw in open(sys.argv[1]):
-    line = raw.strip().lower()
-    if not line:
-        continue
-    parts = line.split()
-    try:
-        parts[0] = f"{int(parts[0], 16):08x}"
-    except (ValueError, IndexError):
-        pass
-    lines_out.append(" ".join(parts))
-with open(sys.argv[2], 'w') as f:
-    f.write('\n'.join(lines_out) + '\n')
-PYEOF
-}
-
-# ─── Fingerprint a single file → content hash of normalized form ─────────────
-# Sets FP_HASH and FP_NORM_PATH on success, FP_ERROR on failure.
-
-FP_HASH=""
-FP_NORM_PATH=""
-FP_ERROR=""
-
-fingerprint_file() {
-  local src="$1"
-  local ext; ext="${src##*.}"
-  local fname; fname="$(basename "$src")"
-  local norm_path="$TEMP_DIR/norm_${fname}.txt"
-
-  FP_HASH=""; FP_NORM_PATH=""; FP_ERROR=""
-
-  case "${ext,,}" in
-    bin)
-      local extracted="$TEMP_DIR/extracted_${fname}.txt"
-      if ! bin_to_txt "$src" "$extracted" 2>/dev/null; then
-        FP_ERROR="Binary extraction failed"
-        return 1
-      fi
-      normalize_txt "$extracted" "$norm_path" 2>/dev/null || {
-        FP_ERROR="Normalization failed after extraction"
-        return 1
-      }
-      ;;
-    txt)
-      normalize_txt "$src" "$norm_path" 2>/dev/null || {
-        FP_ERROR="Text normalization failed"
-        return 1
-      }
-      ;;
-    *)
-      FP_ERROR="Unsupported file type"
-      return 1
-      ;;
-  esac
-
-  FP_HASH=$(sha256 "$norm_path")
-  FP_NORM_PATH="$norm_path"
-}
-
 # ─── Write report ────────────────────────────────────────────────────────────
 
 write_report() {
   local n_groups="$1" n_singletons="$2" n_errors="$3" n_total="$4"
-  # Pass group data via temp file to avoid subshell issues
   local group_data_file="$5"
 
   local dt_file dt_display
@@ -257,7 +137,7 @@ main() {
   echo -e "  Output:  ${CYAN}$OUTPUT_DIR${NC}  (reviewed files moved here)"
   echo -e "  Reports: ${CYAN}$REPORT_DIR${NC}"
 
-  # ── Collect all input files ─────────────────────────────────────────────────
+  # ── Collect all input files ──────────────────────────────────────────────
   local all_files=()
   while IFS= read -r -d '' f; do
     all_files+=("$f")
@@ -272,10 +152,9 @@ main() {
 
   echo -e "  Found:   ${BOLD}${#all_files[@]}${NC} file(s) to fingerprint\n"
 
-  # ── Fingerprint every file ─────────────────────────────────────────────────
+  # ── Fingerprint every file via core/compare.py ──────────────────────────
   header "Fingerprinting ${#all_files[@]} file(s)…"
 
-  # Parallel arrays: file path, content hash, file type, error
   local fp_paths=() fp_hashes=() fp_types=() fp_errors=()
 
   for f in "${all_files[@]}"; do
@@ -287,116 +166,56 @@ main() {
     echo
     log "${CYAN}${type_label}${NC}  $fname"
 
-    if fingerprint_file "$f"; then
-      fp_paths+=("$f")
-      fp_hashes+=("$FP_HASH")
-      fp_types+=("$type_label")
-      fp_errors+=("")
-      log "         Content hash: ${FP_HASH:0:20}…"
-      ok "Fingerprinted"
+    local fp_out fp_status fp_hash fp_rest
+    if fp_out=$(python3 "$CORE_COMPARE" fingerprint "$f" "$TEMP_DIR" "$ENDIAN" "${WORD_SIZES[@]}" 2>&1); then
+      read -r fp_status fp_hash fp_rest <<< "$fp_out"
+      if [[ "$fp_status" == "OK" ]]; then
+        fp_paths+=("$f")
+        fp_hashes+=("$fp_hash")
+        fp_types+=("$type_label")
+        fp_errors+=("")
+        log "         Content hash: ${fp_hash:0:20}…"
+        ok "Fingerprinted"
+      else
+        fp_paths+=("$f")
+        fp_hashes+=("ERROR")
+        fp_types+=("$type_label")
+        fp_errors+=("$fp_hash $fp_rest")
+        err "Failed: $fp_hash $fp_rest  (left in input/)"
+      fi
     else
       fp_paths+=("$f")
       fp_hashes+=("ERROR")
       fp_types+=("$type_label")
-      fp_errors+=("$FP_ERROR")
-      err "Failed: $FP_ERROR  (left in input/)"
+      fp_errors+=("Fingerprint call failed")
+      err "Failed: Fingerprint call failed  (left in input/)"
     fi
   done
 
-  # ── Group by content hash ──────────────────────────────────────────────────
+  # ── Group by content hash via core/compare.py ───────────────────────────
   header "Grouping by content…"
 
-  # Use Python to do the grouping cleanly
   local group_data_file="$TEMP_DIR/group_data.txt"
 
-  python3 - "$group_data_file" "${fp_hashes[@]}" "---PATHS---" "${fp_paths[@]}" "---TYPES---" "${fp_types[@]}" "---ERRORS---" "${fp_errors[@]}" <<'PYEOF'
-import sys, collections
+  python3 "$CORE_COMPARE" group \
+    "$group_data_file" \
+    "${fp_hashes[@]}" \
+    "---PATHS---"  "${fp_paths[@]}" \
+    "---TYPES---"  "${fp_types[@]}" \
+    "---ERRORS---" "${fp_errors[@]}"
 
-args = sys.argv[1:]
-out_file = args[0]
-args = args[1:]
-
-sep_p = args.index("---PATHS---")
-sep_t = args.index("---TYPES---")
-sep_e = args.index("---ERRORS---")
-
-hashes = args[:sep_p]
-paths  = args[sep_p+1:sep_t]
-types  = args[sep_t+1:sep_e]
-errors = args[sep_e+1:]
-
-import os
-
-# Build groups: hash → list of (path, type)
-groups = collections.defaultdict(list)
-error_files = []
-
-for h, p, t, e in zip(hashes, paths, types, errors):
-    fname = os.path.basename(p)
-    if h == "ERROR":
-        error_files.append((fname, t.strip(), e))
-    else:
-        groups[h].append((fname, t.strip(), h))
-
-# Sort groups: multi-file first (matches), then singletons
-matches   = {h: v for h, v in groups.items() if len(v) >= 2}
-singletons = {h: v for h, v in groups.items() if len(v) == 1}
-
-lines = []
-
-if matches:
-    lines.append("============================================================")
-    lines.append("  MATCH GROUPS")
-    lines.append("============================================================")
-    lines.append("")
-    for i, (h, members) in enumerate(sorted(matches.items(), key=lambda x: -len(x[1])), 1):
-        lines.append(f"  GROUP {i}  —  {len(members)} files  (content hash: {h[:20]}…)")
-        for fname, ftype, _ in sorted(members):
-            lines.append(f"    [{ftype}]  {fname}")
-        lines.append("")
-
-if singletons:
-    lines.append("============================================================")
-    lines.append("  UNIQUE FILES  (no match found)")
-    lines.append("============================================================")
-    lines.append("")
-    for h, members in sorted(singletons.items()):
-        fname, ftype, _ = members[0]
-        lines.append(f"    [{ftype}]  {fname}  (hash: {h[:20]}…)")
-    lines.append("")
-
-if error_files:
-    lines.append("============================================================")
-    lines.append("  ERRORS  (could not fingerprint — left in input/)")
-    lines.append("============================================================")
-    lines.append("")
-    for fname, ftype, e in error_files:
-        lines.append(f"    [{ftype}]  {fname}  —  {e}")
-    lines.append("")
-
-# Write counts as first line for bash to read back
-n_groups    = len(matches)
-n_singletons = len(singletons)
-n_errors    = len(error_files)
-
-with open(out_file, 'w') as f:
-    f.write(f"COUNTS {n_groups} {n_singletons} {n_errors}\n")
-    f.write('\n'.join(lines) + '\n')
-PYEOF
-
-  # Read counts back from first line
+  # Read counts from first line
   local count_line
   count_line=$(head -1 "$group_data_file")
   local n_groups n_singletons n_errors
   read -r _ n_groups n_singletons n_errors <<< "$count_line"
-  # Strip the counts line from the data file
+
   local clean_group_file="$TEMP_DIR/group_data_clean.txt"
   tail -n +2 "$group_data_file" > "$clean_group_file"
 
-  # Print groups to terminal
   cat "$clean_group_file"
 
-  # ── Move reviewed files to output/ ─────────────────────────────────────────
+  # ── Move reviewed files to output/ ──────────────────────────────────────
   header "Moving reviewed files to output/…"
   local moved=0
   for i in "${!fp_hashes[@]}"; do
@@ -409,7 +228,7 @@ PYEOF
   done
   log "${moved} file(s) moved to output/"
 
-  # ── Write report ────────────────────────────────────────────────────────────
+  # ── Write report ────────────────────────────────────────────────────────
   echo
   header "Writing compare report…"
   local n_processed=$(( ${#all_files[@]} - n_errors ))
@@ -417,7 +236,7 @@ PYEOF
   rpt=$(write_report "$n_groups" "$n_singletons" "$n_errors" "$n_processed" "$clean_group_file")
   ok "Compare report: ${CYAN}$(basename "$rpt")${NC}"
 
-  # ── Summary ─────────────────────────────────────────────────────────────────
+  # ── Summary ─────────────────────────────────────────────────────────────
   echo
   echo -e "${BOLD}─────────────────────────────────────${NC}"
   echo -e "  ${BOLD}Files:${NC} ${#all_files[@]}  |  ${GREEN}Groups: $n_groups${NC}  |  Unique: $n_singletons  |  ${RED}Errors: $n_errors${NC}"

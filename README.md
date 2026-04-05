@@ -12,7 +12,7 @@ Built for teams that need to **read, diff, and version-control binary files** wi
 |--------|---------|
 | `convert_inputs.sh` | Convert `.bin` ↔ `.txt` — no review, just go |
 | `edit_inputs.sh` | Draft-first workflow — review before committing to binary |
-| `compare_inputs.sh` | Verify that a `.bin` and `.txt` pair contain identical data |
+| `compare_inputs.sh` | Fingerprint any mix of `.bin`/`.txt` files, group identical content, move reviewed files to `output/` |
 
 ---
 
@@ -79,18 +79,24 @@ Both binaries are produced independently so you can diff them.
 
 ## compare_inputs.sh — Compare
 
-Verifies that `.bin`/`.txt` pairs contain identical data.
+Fingerprints every file in `input/` by its **normalized binary content**, then groups all files that represent identical data — regardless of filename or file type.
 
 ```bash
 ./scripts/compare_inputs.sh
 ```
 
-- **Strict pairing required** — every `.bin` must have a `.txt` with the same base name, and vice versa
-- Unpaired files are flagged and left in `input/` untouched
-- For each pair: extracts the `.bin` using current config, normalizes both sides, compares
-- Result is `MATCH` or `MISMATCH` — mismatches include a line-level diff
-- Reviewed pairs (both files) are moved to `output/` regardless of result
+- Drop any mix of `.bin` and `.txt` files into `input/` — no naming convention required
+- Each file is normalized: `.bin` files are extracted using current config, `.txt` files are address-padded; then a SHA-256 is taken of the normalized form
+- Files with the same content hash are grouped together as a **match group**
+- Files with no match are reported as **unique**
+- Files that can't be processed (bad format, unsupported type) are flagged as **errors** and left in `input/` untouched
+- All successfully fingerprinted files are moved to `output/` as "reviewed"
 - Compare report written to `output/reports/`
+
+**Useful for:**
+- Confirming a `.txt` edit round-trips back to the original `.bin`
+- Detecting duplicate binary files hiding under different names
+- Auditing a folder of configs for unintended divergence
 
 ---
 
@@ -141,9 +147,11 @@ Each row: `ADDRESS  WORD1  [WORD2  [WORD3 ...]]`
 
 | Tool | Notes |
 |------|-------|
-| `bash` 4.0+ | |
+| `bash` 4.0+ | macOS/Linux native; Windows requires Git Bash or WSL |
 | `python3` | Extraction, reconstruction, validation |
 | `sha256sum` | Linux — or `shasum` on macOS (auto-detected) |
+
+> **Windows users:** double-clicking `.sh` files won't work natively. Open **Git Bash** or **WSL**, `cd` to the repo, and run the scripts from there. Everything else works the same.
 
 ---
 

@@ -12,3 +12,5 @@ output/*
 output/reports/*
 !output/reports/.gitkeep
 !output/reports/example_*
+__pycache__/
+*.pyc
