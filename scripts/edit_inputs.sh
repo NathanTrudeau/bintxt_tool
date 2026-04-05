@@ -5,30 +5,13 @@
 # Usage:
 #   ./scripts/edit_inputs.sh           — DRAFT mode
 #   ./scripts/edit_inputs.sh apply     — APPLY mode
-#
-# ── DRAFT mode (no args) ──────────────────────────────────────────────────────
-#   Scans input/ for .bin and .txt files and writes DRAFT copies to output/:
-#     .bin files  → extracted to text → output/__DRAFT_name.txt
-#     .txt files  → format-verified, normalized → output/__DRAFT_name.txt
-#   Writes a draft report. Exits cleanly. No prompt, no timeout.
-#
-# ── APPLY mode (./scripts/edit_inputs.sh apply) ───────────────────────────────────────
-#   Scans output/ for __DRAFT_*.txt files.
-#   Validates each against config, converts to output/name.bin.
-#   Removes the __DRAFT_ copy on success.
-#   Writes an apply report. Exits cleanly.
-#
-# Interrupted mid-run (terminal closed)? Draft files remain in output/ and
-# the report captures what was done up to that point on next apply run.
-#
-# Outputs land in ./output/   Reports land in ./output/reports/
-# Config is the source of truth — all files validated against WORD_SIZES/ENDIAN.
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CORE="$REPO_DIR/core/convert.py"
 
 # ─── Load config ─────────────────────────────────────────────────────────────
 
@@ -42,7 +25,6 @@ else
   REPORT_DIR="output/reports"
 fi
 
-# Backward-compat: if old WORD_SIZE is set but WORD_SIZES is not
 if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
   WORD_SIZES=("$WORD_SIZE")
 fi
@@ -73,8 +55,6 @@ warn()   { echo -e "  ${YELLOW}⚠${NC}  $*"; }
 err()    { echo -e "  ${RED}✗${NC} $*"; }
 header() { echo -e "\n${BOLD}${BLUE}$*${NC}"; }
 
-# ─── Report state ────────────────────────────────────────────────────────────
-
 DRAFT_ENTRIES=()
 DRAFT_ERRORS=()
 APPLY_ENTRIES=()
@@ -85,9 +65,6 @@ APPLY_ERRORS=()
 check_deps() {
   local missing=()
   command -v python3 &>/dev/null || missing+=("python3")
-  if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
-    missing+=("sha256sum or shasum")
-  fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     err "Missing required tools: ${missing[*]}"
     exit 1
@@ -104,245 +81,15 @@ check_deps() {
   done
 }
 
-sha256() {
-  if command -v sha256sum &>/dev/null; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
+# ─── Wrappers around core/convert.py ─────────────────────────────────────────
 
-# ─── BIN → TXT ───────────────────────────────────────────────────────────────
-
-bin_to_txt() {
-  local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
-import sys
-
-src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
-word_sizes = [int(x) for x in sys.argv[4:]]
-stride = sum(word_sizes)
-
-with open(src, 'rb') as f:
-    data = f.read()
-
-lines = []
-offset = 0
-
-while offset < len(data):
-    parts = [f"{offset:08x}"]
-    cur = offset
-    for ws in word_sizes:
-        chunk = data[cur:cur+ws] if cur + ws <= len(data) else \
-                data[cur:] + b'\x00' * (ws - max(0, len(data) - cur))
-        val = int.from_bytes(chunk[:ws], byteorder=endian)
-        parts.append(f"{val:0{ws*2}x}")
-        cur += ws
-    lines.append(" ".join(parts))
-    offset += stride
-
-lines.append(f"{offset:08x}")
-
-with open(dst, 'w') as f:
-    f.write('\n'.join(lines) + '\n')
-PYEOF
-}
-
-# ─── TXT → BIN ───────────────────────────────────────────────────────────────
-
-txt_to_bin() {
-  local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
-import sys
-
-src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
-word_sizes = [int(x) for x in sys.argv[4:]]
-n_words = len(word_sizes)
-stride  = sum(word_sizes)
-
-entries = []
-with open(src) as f:
-    for line in f:
-        parts = line.strip().split()
-        if len(parts) < 2:
-            continue
-        try:
-            addr = int(parts[0], 16)
-            vals = [int(v, 16) for v in parts[1:n_words + 1]]
-        except ValueError:
-            continue
-        if len(vals) < n_words:
-            continue
-        entries.append((addr, vals))
-
-if not entries:
-    print("ERROR: no valid rows found", file=sys.stderr)
-    sys.exit(1)
-
-last_addr = entries[-1][0]
-file_size = last_addr + stride
-buf = bytearray(file_size)
-
-for addr, vals in entries:
-    cur = addr
-    for val, ws in zip(vals, word_sizes):
-        buf[cur:cur+ws] = val.to_bytes(ws, byteorder=endian)
-        cur += ws
-
-with open(dst, 'wb') as f:
-    f.write(buf)
-PYEOF
-}
-
-# ─── TXT format validation ────────────────────────────────────────────────────
-
-validate_txt_format() {
-  local src="$1"
-  python3 - "$src" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
-import sys
-
-src        = sys.argv[1]
-endian     = sys.argv[2]
-word_sizes = [int(x) for x in sys.argv[3:]]
-n_words    = len(word_sizes)
-issues     = []
-line_num   = 0
-
-with open(src) as f:
-    for raw in f:
-        line_num += 1
-        line = raw.strip()
-        if not line:
-            continue
-        parts = line.split()
-        if len(parts) == 1:
-            continue
-        if len(parts) < 2:
-            issues.append(f"line {line_num}: unparseable — '{line[:60]}'")
-            continue
-        try:
-            addr = int(parts[0], 16)
-        except ValueError:
-            issues.append(f"line {line_num}: bad address '{parts[0]}'")
-            continue
-
-        stride = sum(word_sizes)
-        if addr % stride != 0:
-            issues.append(f"line {line_num}: address 0x{addr:x} not aligned to stride={stride}")
-
-        val_parts = parts[1:]
-        if len(val_parts) != n_words:
-            issues.append(f"line {line_num}: expected {n_words} value column(s), got {len(val_parts)}")
-            continue
-
-        for i, (vp, ws) in enumerate(zip(val_parts, word_sizes)):
-            expected_len = ws * 2
-            try:
-                val = int(vp, 16)
-            except ValueError:
-                issues.append(f"line {line_num}: word {i+1}: bad hex '{vp}'")
-                continue
-            max_val = (1 << (ws * 8)) - 1
-            if val > max_val:
-                issues.append(f"line {line_num}: word {i+1}: value 0x{val:x} overflows {ws}-byte field")
-            if len(vp) != expected_len:
-                issues.append(f"line {line_num}: word {i+1}: width {len(vp)} chars (expected {expected_len} for {ws}B)")
-
-if issues:
-    print("ISSUES\n" + "\n".join(issues))
-else:
-    print("OK")
-PYEOF
-}
-
-# ─── Normalize TXT ───────────────────────────────────────────────────────────
-
-normalize_txt() {
-  local src="$1" dst="$2"
-  python3 - "$src" "$dst" "$ENDIAN" "${WORD_SIZES[@]}" <<'PYEOF'
-import sys
-
-src, dst, endian = sys.argv[1], sys.argv[2], sys.argv[3]
-word_sizes = [int(x) for x in sys.argv[4:]]
-n_words = len(word_sizes)
-lines_out = []
-
-with open(src) as f:
-    for raw in f:
-        line = raw.strip()
-        if not line:
-            continue
-        parts = line.split()
-        if len(parts) == 1:
-            try:
-                lines_out.append(f"{int(parts[0], 16):08x}")
-            except ValueError:
-                lines_out.append(line)
-            continue
-        if len(parts) >= n_words + 1:
-            try:
-                addr = int(parts[0], 16)
-                row = [f"{addr:08x}"]
-                for i, ws in enumerate(word_sizes):
-                    val = int(parts[i+1], 16) if i+1 < len(parts) else 0
-                    row.append(f"{val:0{ws*2}x}")
-                lines_out.append(" ".join(row))
-                continue
-            except ValueError:
-                pass
-        lines_out.append(line)
-
-with open(dst, 'w') as f:
-    f.write("\n".join(lines_out) + "\n")
-PYEOF
-}
-
-# ─── Verification ────────────────────────────────────────────────────────────
-
-verify_bin_roundtrip() {
-  local orig_bin="$1" gen_txt="$2"
-  local temp_bin="$TEMP_DIR/rt_$(basename "$orig_bin")"
-  txt_to_bin "$gen_txt" "$temp_bin" 2>/dev/null || { echo "ROUNDTRIP_FAILED"; return 1; }
-  local orig_hash rt_hash
-  orig_hash=$(sha256 "$orig_bin")
-  rt_hash=$(sha256 "$temp_bin")
-  echo "$orig_hash $rt_hash"
-  [[ "$orig_hash" == "$rt_hash" ]]
-}
-
-normalize_for_compare() {
-  # Lowercase, strip trailing whitespace, skip blanks, pad addresses to 8 hex digits
-  python3 - "$1" <<'PYNORM'
-import sys
-for raw in open(sys.argv[1]):
-    line = raw.strip().lower()
-    if not line:
-        continue
-    parts = line.split()
-    try:
-        parts[0] = f"{int(parts[0], 16):08x}"
-    except (ValueError, IndexError):
-        pass
-    print(" ".join(parts))
-PYNORM
-}
-
-verify_txt_roundtrip() {
-  local orig_txt="$1" gen_bin="$2"
-  local temp_txt="$TEMP_DIR/rt_$(basename "$orig_txt")"
-  bin_to_txt "$gen_bin" "$temp_txt"
-  local gen_hash; gen_hash=$(sha256 "$gen_bin")
-  local norm_orig norm_rt
-  norm_orig=$(normalize_for_compare "$orig_txt")
-  norm_rt=$(normalize_for_compare "$temp_txt")
-  if [[ "$norm_orig" == "$norm_rt" ]]; then
-    echo "$gen_hash"; return 0
-  else
-    echo "MISMATCH"
-    diff <(echo "$norm_orig") <(echo "$norm_rt") 2>&1 || true
-    return 1
-  fi
-}
+bin_to_txt()          { python3 "$CORE" bin_to_txt  "$1" "$2" "$ENDIAN" "${WORD_SIZES[@]}"; }
+txt_to_bin()          { python3 "$CORE" txt_to_bin  "$1" "$2" "$ENDIAN" "${WORD_SIZES[@]}"; }
+validate_txt()        { python3 "$CORE" validate     "$1" "$ENDIAN" "${WORD_SIZES[@]}"; }
+normalize_txt()       { python3 "$CORE" normalize    "$1" "$2" "$ENDIAN" "${WORD_SIZES[@]}"; }
+sha256()              { python3 "$CORE" sha256       "$1"; }
+verify_bin_roundtrip(){ python3 "$CORE" verify_b2t   "$1" "$2" "$TEMP_DIR" "$ENDIAN" "${WORD_SIZES[@]}"; }
+verify_txt_roundtrip(){ python3 "$CORE" verify_t2b   "$1" "$2" "$TEMP_DIR" "$ENDIAN" "${WORD_SIZES[@]}"; }
 
 # ─── Format report entry ─────────────────────────────────────────────────────
 
@@ -367,10 +114,8 @@ format_entry() {
 
 # ─── DRAFT MODE ──────────────────────────────────────────────────────────────
 
-# Draft a .bin file: extract → __DRAFT_name.txt  (or __DRAFT_name~bin.txt on conflict)
 draft_bin() {
-  local src="$1"
-  local draft_label="${2:-}"   # optional override stem (e.g. "name~bin")
+  local src="$1" draft_label="${2:-}"
   local filename; filename="$(basename "$src")"
   local base="${filename%.*}"
   local stem="${draft_label:-${base}}"
@@ -387,7 +132,6 @@ draft_bin() {
   local output_info="__DRAFT_${stem}.txt  (${rows} rows)"
   log "       → ${CYAN}${output_info}${NC}"
 
-  # Quick roundtrip check for the draft itself
   local verify_out
   if verify_out=$(verify_bin_roundtrip "$src" "$draft_dst" 2>&1); then
     read -r _ hash_b <<< "$verify_out"
@@ -403,10 +147,8 @@ draft_bin() {
   [[ "$status" != "FAIL" ]]
 }
 
-# Draft a .txt file: format-check + normalize → __DRAFT_name.txt  (or __DRAFT_name~txt.txt on conflict)
 draft_txt() {
-  local src="$1"
-  local draft_label="${2:-}"   # optional override stem (e.g. "name~txt")
+  local src="$1" draft_label="${2:-}"
   local filename; filename="$(basename "$src")"
   local base="${filename%.*}"
   local stem="${draft_label:-${base}}"
@@ -416,7 +158,7 @@ draft_txt() {
   log "${CYAN}DRAFT${NC}  TXT      $filename"
 
   local fmt_result
-  fmt_result=$(validate_txt_format "$src" 2>&1)
+  fmt_result=$(validate_txt "$src" 2>&1)
   if [[ "$fmt_result" == OK ]]; then
     fmt_notes="Format matches config (WORD_SIZES=${WORD_SIZES[*]}, ENDIAN=${ENDIAN})"
     ok "Format valid"
@@ -437,7 +179,6 @@ draft_txt() {
   DRAFT_ENTRIES+=("$(format_entry "TXT → DRAFT  [FORMAT CHECK]" "$filename" "__DRAFT_${stem}.txt" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")")
 }
 
-# Write the draft report
 write_draft_report() {
   local total="$1" failed="$2"
   local dt_file dt_display
@@ -498,19 +239,18 @@ write_draft_report() {
 
 # ─── APPLY MODE ──────────────────────────────────────────────────────────────
 
-# Apply a single __DRAFT_*.txt → name.bin
 apply_draft() {
   local src="$1"
-  local filename; filename="$(basename "$src")"            # __DRAFT_name.txt  or __DRAFT_name~bin.txt
-  local base="${filename#__DRAFT_}"                        # name.txt  or  name~bin.txt
-  base="${base%.*}"                                        # name  or  name~bin
-  local dst="$OUTPUT_DIR/${base}.bin"                      # name.bin  or  name~bin.bin
+  local filename; filename="$(basename "$src")"
+  local base="${filename#__DRAFT_}"
+  base="${base%.*}"
+  local dst="$OUTPUT_DIR/${base}.bin"
   local status="PASS" detail="" fmt_notes="" hash_a hash_b output_info input_size
 
   log "${CYAN}APPLY${NC}  __DRAFT_${base}.txt → ${base}.bin"
 
   local fmt_result
-  fmt_result=$(validate_txt_format "$src" 2>&1)
+  fmt_result=$(validate_txt "$src" 2>&1)
   if [[ "$fmt_result" == OK ]]; then
     fmt_notes="Format matches config (WORD_SIZES=${WORD_SIZES[*]}, ENDIAN=${ENDIAN})"
     ok "Format valid"
@@ -544,7 +284,6 @@ apply_draft() {
   if verify_out=$(verify_txt_roundtrip "$src" "$dst" 2>&1); then
     hash_b="$verify_out"
     ok "Roundtrip verified  SHA-256: ${hash_b:0:20}…"
-    # Clean up draft on success
     rm -f "$src"
     log "       → DRAFT removed"
   else
@@ -638,7 +377,6 @@ run_draft() {
     exit 0
   fi
 
-  # ── Detect naming conflicts (same base name in both .bin and .txt) ────────────
   declare -A bin_bases txt_bases
   for f in "${bin_files[@]}"; do
     local b; b="$(basename "${f%.*}")"
@@ -674,10 +412,7 @@ run_draft() {
       echo
       local b; b="$(basename "${f%.*}")"
       local stem="$b"
-      # Tag stem if there's a conflict with a same-named .txt
-      if [[ -n "${txt_bases[$b]:-}" ]]; then
-        stem="${b}~bin"
-      fi
+      if [[ -n "${txt_bases[$b]:-}" ]]; then stem="${b}~bin"; fi
       if draft_bin "$f" "$stem"; then
         (( drafted++ )) || true
       else
@@ -692,10 +427,7 @@ run_draft() {
       echo
       local b; b="$(basename "${f%.*}")"
       local stem="$b"
-      # Tag stem if there's a conflict with a same-named .bin
-      if [[ -n "${bin_bases[$b]:-}" ]]; then
-        stem="${b}~txt"
-      fi
+      if [[ -n "${bin_bases[$b]:-}" ]]; then stem="${b}~txt"; fi
       draft_txt "$f" "$stem"
       (( drafted++ )) || true
     done
@@ -784,6 +516,8 @@ run_apply() {
 
 check_deps
 
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
 case "${1:-}" in
   apply) run_apply ;;
   "")    run_draft ;;
@@ -794,5 +528,3 @@ case "${1:-}" in
     exit 1
     ;;
 esac
-
-trap 'rm -rf "$TEMP_DIR"' EXIT
