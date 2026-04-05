@@ -1,88 +1,96 @@
 # bintxt_tool
 
-**v1.2.0**
+Convert, edit, and verify binary configuration files using human-readable hex text dumps.
 
-Bash script for converting binary files ↔ human-readable text (od hex dump format), with SHA-256 roundtrip verification and detailed conversion reports.
-
-Built for teams that need to **read, edit, diff, and version-control binary configuration files** without specialized tooling.
+Built for teams that need to **read, diff, and version-control binary files** without specialized tooling.
 
 ---
 
-## Repository Structure
+## Three Scripts
 
-```
-bintxt_tool/
-  input/                     ← drop your .bin or .txt files here
-    cfg-example.bin          ← example binary (32-word, 128-byte config)
-    cfg-example.txt          ← example text dump of the above
-  output/                    ← converted files land here
-    reports/                 ← timestamped conversion reports
-      example_success_*.txt  ← example of a clean all-pass report
-      example_failure_*.txt  ← example of a report with errors
-  convert_inputs.sh          ← the script
-  config.sh                  ← edit word size, byte order, folder paths
-  README.md
-  .gitignore
-```
+| Script | Purpose |
+|--------|---------|
+| `convert_inputs.sh` | Convert `.bin` ↔ `.txt` — no review, just go |
+| `edit_inputs.sh` | Draft-first workflow — review before committing to binary |
+| `compare_inputs.sh` | Verify that a `.bin` and `.txt` pair contain identical data |
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone
 git clone https://github.com/NathanTrudeau/bintxt_tool.git
 cd bintxt_tool
 
-# 2. (Optional) Edit config.sh to match your binary format
-
-# 3. Drop your files into input/
-#    .bin files → extracted to .txt immediately
-#    .txt files → validated and saved as __DRAFT, then prompted for binary conversion
-
-# 4. Run
-./convert_inputs.sh
+# (Optional) edit config.sh to match your binary format
+# Drop files into input/ and run the appropriate script
 ```
-
-Converted files and reports all land in `output/`.
 
 ---
 
-## How It Works
+## convert_inputs.sh — Convert
 
-### .bin files (EXTRACT)
-
-Binary files are converted to human-readable text using `od`:
+Converts everything in `input/` in one pass. No prompts.
 
 ```
-od -tx4 -Ax -v -w4 file.bin
+.bin  →  extracted to .txt     (EXTRACT)
+.txt  →  validated + converted to .bin  (APPLY)
 ```
 
-Output format — one 4-byte word per line:
-```
-00000000 bef3a4c2
-00000004 01000000
-00000008 00000000
-0000000c deadbeef
-...
-000000fc 00000001
-00000100
+```bash
+./convert_inputs.sh
 ```
 
-- **Left column**: hex address
-- **Right column**: hex value (width determined by `WORD_SIZE` in config.sh)
-- **Last line**: final address only — marks end of file
+- Both directions run automatically
+- Format issues in `.txt` files are flagged in the apply report but conversion still proceeds
+- All output files land in `output/`
+- Two reports written: `extract_conversion-report` and `apply_conversion-report`
 
-### .txt files (DRAFT → APPLY)
+---
 
-Text files go through a two-step flow:
+## edit_inputs.sh — Edit
 
-1. **DRAFT** — the file is validated against your config settings (word size, alignment, byte order) and a normalized `__DRAFT_filename.txt` is written to `output/` for review
-2. **Prompt** — `Review them, then convert to binary? [y/N]`
-   - `y` → applies all .txt files to binary, cleans up `__DRAFT` copies, writes apply report
-   - `n` (or timeout) → stops here; `__DRAFT` files are preserved in `output/` for inspection
+Two-step draft workflow. Review before anything becomes a binary.
 
-This lets you catch format mismatches **before** committing to binary.
+**Step 1 — Create drafts:**
+```bash
+./edit_inputs.sh
+```
+- `.bin` files → extracted to `output/__DRAFT_name.txt`
+- `.txt` files → format-checked, normalized → `output/__DRAFT_name.txt`
+- Nothing is converted yet. Review the `__DRAFT_*` files first.
+
+**Step 2 — Apply drafts to binary:**
+```bash
+./edit_inputs.sh apply
+```
+- All `__DRAFT_*.txt` files in `output/` are converted to `.bin`
+- `__DRAFT_` copy is removed on success
+- Apply report written to `output/reports/`
+
+**Naming conflicts** (same base name in both `.bin` and `.txt`):
+```
+input/config.bin  →  output/__DRAFT_config~bin.txt  →  output/config~bin.bin
+input/config.txt  →  output/__DRAFT_config~txt.txt  →  output/config~txt.bin
+```
+Both binaries are produced independently so you can diff them.
+
+---
+
+## compare_inputs.sh — Compare
+
+Verifies that `.bin`/`.txt` pairs contain identical data.
+
+```bash
+./compare_inputs.sh
+```
+
+- **Strict pairing required** — every `.bin` must have a `.txt` with the same base name, and vice versa
+- Unpaired files are flagged and left in `input/` untouched
+- For each pair: extracts the `.bin` using current config, normalizes both sides, compares
+- Result is `MATCH` or `MISMATCH` — mismatches include a line-level diff
+- Reviewed pairs (both files) are moved to `output/` regardless of result
+- Compare report written to `output/reports/`
 
 ---
 
@@ -92,89 +100,40 @@ Edit `config.sh` before running — no flags needed:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `ENDIAN` | `little` | Byte order: `little` (x86/ARM) or `big` (MIPS/PowerPC) |
-| `WORD_SIZE` | `4` | Bytes per address entry: `1`, `2`, `4`, or `8` |
-| `INPUT_DIR` | `input` | Folder to scan for files |
+| `ENDIAN` | `little` | `little` (x86/ARM) or `big` (MIPS/PowerPC) |
+| `WORD_SIZES` | `(4)` | Bytes per word, 1–6 words per row (see below) |
+| `INPUT_DIR` | `input` | Folder to scan |
 | `OUTPUT_DIR` | `output` | Folder for converted files |
-| `REPORT_DIR` | `output/reports` | Folder for conversion reports |
+| `REPORT_DIR` | `output/reports` | Folder for reports |
 
-**Config is the source of truth.** All incoming .txt files are validated against `WORD_SIZE` and `ENDIAN` before conversion. Mismatches are flagged in the apply report with line-level detail.
-
----
-
-## Conversion Reports
-
-Two separate reports are generated per run (only written if that direction ran):
-
-| Report | Filename pattern |
-|--------|-----------------|
-| Extract (BIN→TXT) | `YYYY-MM-DD_HHMMam_bintxt-tool_binary-to-text_extract_conversion-report.txt` |
-| Apply (TXT→BIN) | `YYYY-MM-DD_HHMMam_bintxt-tool_text-to-binary_apply_conversion-report.txt` |
-
-Each report includes:
-- Full config block (source of truth at time of run)
-- Summary: total / passed / failed / draft-only
-- Per-file detail: input size, output file, SHA-256 of both, roundtrip pass/fail, format notes
-- Error section with line-level diff and cause guidance
-
-See `output/reports/example_success_*.txt` and `output/reports/example_failure_*.txt` for real examples.
-
----
-
-## Verification
-
-Every conversion is verified via SHA-256 roundtrip:
-
-- **BIN→TXT**: generated `.txt` is reconstructed to `.bin`; SHA-256 compared to original
-- **TXT→BIN**: generated `.bin` is converted back to `.txt`; normalized diff compared to original
-
-A mismatch is a `FAIL` and is detailed in the error section of the report.
-
----
-
-## Handling Partial / Edited Files
-
-| Input | Behavior |
-|-------|----------|
-| Full sequential dump | Full binary reconstruction |
-| Sparse / partial (some addresses only) | Gaps filled with `0x00` |
-
-To patch a specific value: open the `.txt`, change the value at the address you care about, leave everything else untouched, then run and press `y`.
-
----
-
-## Diffing Binaries
-
+**`WORD_SIZES` examples:**
 ```bash
-diff output/version_a.txt output/version_b.txt
+WORD_SIZES=(4)        # one 32-bit word per row       → 00000000 deadbeef
+WORD_SIZES=(4 4)      # two 32-bit words per row       → 00000000 deadbeef cafebabe
+WORD_SIZES=(4 2 1)    # 32-bit + 16-bit + 8-bit        → 00000000 deadbeef cafe ff
+WORD_SIZES=(2 2 2 2)  # four 16-bit words per row      → 00000000 dead beef cafe babe
 ```
 
-Or with git:
-
-```bash
-git diff HEAD~1 HEAD -- output/config_v2.txt
-```
+Config is the source of truth. All files — `.bin` and `.txt` — are validated against it.
 
 ---
 
-## Adding to an Existing Repo
+## Text Format
+
+Each row: `ADDRESS  WORD1  [WORD2  [WORD3 ...]]`
 
 ```
-your_config_repo/
-  configs/
-    device_a.bin
-  bintxt_tool/        ← drop here
-    convert_inputs.sh
-    config.sh
-    input/
-    output/
+00000000 deadbeef
+00000004 01000000
+00000008 00000000
+0000000c 000000ff
+...
+00000080
 ```
 
-```bash
-cd bintxt_tool
-cp ../configs/device_a.bin input/
-./convert_inputs.sh
-```
+- **Address** — 8-digit hex, increments by `sum(WORD_SIZES)` per row
+- **Values** — one hex field per entry in `WORD_SIZES`, width = `word_size × 2` digits
+- **Last line** — address only, marks end of file
 
 ---
 
@@ -182,66 +141,16 @@ cp ../configs/device_a.bin input/
 
 | Tool | Notes |
 |------|-------|
-| `bash` | 4.0+ |
-| `od` | Standard on Linux/macOS |
-| `python3` | Used for binary reconstruction (txt→bin) |
+| `bash` 4.0+ | |
+| `python3` | Extraction, reconstruction, validation |
 | `sha256sum` | Linux — or `shasum` on macOS (auto-detected) |
 
 ---
 
 ## Branches
 
-| Branch | Purpose |
+| Branch | Contents |
 |--------|---------|
-| `main` | Core tool — stable, single example pair, no extras |
-| `seeded_testing` | Extra example files for testing and validation |
-| `ui` | Optional drag-drop web UI (Flask + HTML) — not required to use the tool |
-
----
-
-## Example Run
-
-```
-bintxt_tool  (word: 4B · endian: little)
-  Input:   ./input
-  Output:  ./output
-  Reports: ./output/reports
-
-EXTRACT — 1 binary file(s)…
-
-  EXTRACT  BIN→TXT  hw_config.bin
-           → hw_config.txt  (32 address entries)
-  ✓ Roundtrip verified  SHA-256: ae1d5f650fed5f171918…
-
-  Archiving input .bin files → output/
-
-DRAFT — 1 text file(s) found…
-
-  DRAFT    TXT      hw_config.txt
-  ✓ Format valid — matches config
-           → __DRAFT_hw_config.txt written to output/
-
-  __DRAFT copies written to output/
-  Review them, then convert to binary? [y/N] y
-
-APPLY — converting 1 text file(s) to binary…
-
-  APPLY    TXT→BIN  hw_config.txt
-           → Normalized txt: hw_config.txt
-           → hw_config.bin  (128 bytes)
-  ✓ Roundtrip verified  SHA-256: ae1d5f650fed5f171918…
-           → __DRAFT cleaned up
-
-Writing reports…
-  ✓ Extract report: 2026-04-01_0215pm_bintxt-tool_binary-to-text_extract_conversion-report.txt
-  ✓ Apply report:   2026-04-01_0215pm_bintxt-tool_text-to-binary_apply_conversion-report.txt
-
-─────────────────────────────────────
-  Passed: 2  |  Failed: 0  |  Total: 2
-  Outputs + reports in output/
-─────────────────────────────────────
-
-  All conversions verified successfully.
-
-  Closing in 5 seconds…
-```
+| `main` | Core tool — stable, single example pair |
+| `seeded_testing` | Extra example files for validation |
+| `ui` | Optional drag-drop web UI (in development) |
