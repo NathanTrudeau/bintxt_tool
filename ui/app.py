@@ -179,12 +179,11 @@ class BintxtApp(tk.Tk):
                  font=UI_SB).pack(side="left", pady=4)
 
         if is_input:
-            self._sbtn(hdr, "Add",   self._browse_files).pack(side="right", padx=(0, 4), pady=4)
-            self._sbtn(hdr, "Clear", self._clear_input, danger=True).pack(side="right", padx=(0, 2), pady=4)
+            self._sbtn(hdr, "Add", self._browse_files).pack(side="right", padx=(0, 4), pady=4)
 
         _border(parent, thick=2, color=BORDER).pack(fill="x")
 
-        # Listbox
+        # Listbox (multi-select)
         box_frame = tk.Frame(parent, bg=SURFACE)
         box_frame.pack(fill="both", expand=True)
 
@@ -198,16 +197,27 @@ class BintxtApp(tk.Tk):
             selectbackground=SEL_BG, selectforeground=FG,
             font=MONO_S, relief="flat", borderwidth=0, highlightthickness=0,
             activestyle="none", yscrollcommand=sb.set,
+            selectmode="extended",
         )
         lb.pack(fill="both", expand=True, padx=(4, 0))
         sb.config(command=lb.yview)
 
+        # Action buttons row below the listbox
+        act = tk.Frame(parent, bg=SURFACE2)
+        act.pack(fill="x")
+        _border(parent, thick=1, color=BORDER_S).pack(fill="x")
+
         if is_input:
             self._input_lb = lb
             lb.bind("<<ListboxSelect>>", self._on_input_select)
+            self._sbtn(act, "Clear Selected", lambda: self._clear_selected(input=True),  danger=True).pack(side="left", padx=4, pady=4)
+            self._sbtn(act, "Clear All",      self._clear_input, danger=True).pack(side="left", pady=4)
         else:
             self._output_lb = lb
             lb.bind("<<ListboxSelect>>", self._on_output_select)
+            self._sbtn(act, "Move to Input",  self._move_to_input).pack(side="left", padx=4, pady=4)
+            self._sbtn(act, "Clear Selected", lambda: self._clear_selected(input=False), danger=True).pack(side="left", pady=4)
+            self._sbtn(act, "Clear All",      self._clear_output, danger=True).pack(side="left", padx=4, pady=4)
 
     def _build_viewer(self, parent):
         vhdr = tk.Frame(parent, bg=SURFACE2, height=28)
@@ -345,7 +355,7 @@ class BintxtApp(tk.Tk):
         if not path:
             return
         content = self._log.get("1.0", "end")
-        Path(path).write_text(content)
+        Path(path).write_text(content, encoding="utf-8")
         self.log_ok(f"Log saved: {path}")
 
     def _set_status(self, msg):
@@ -429,6 +439,53 @@ class BintxtApp(tk.Tk):
         self.log_warn(f"Cleared {removed} file(s) from input/")
         self._sel_input = None
         self._clear_viewer()
+        self._refresh_all()
+
+    def _clear_output(self):
+        cfg = _cfg()
+        removed = 0
+        for f in Path(cfg["output_dir"]).iterdir():
+            if f.is_file() and f.suffix.lower() in (".bin", ".txt"):
+                f.unlink(); removed += 1
+        self.log_warn(f"Cleared {removed} file(s) from output/")
+        self._sel_output = None
+        self._clear_viewer()
+        self._refresh_all()
+
+    def _clear_selected(self, input=True):
+        if input:
+            sel = self._input_lb.curselection()
+            files = self._input_files
+        else:
+            sel = self._output_lb.curselection()
+            files = self._output_files
+        if not sel:
+            self.log_warn("No files selected"); return
+        removed = 0
+        for idx in sel:
+            if idx < len(files):
+                files[idx].unlink(); removed += 1
+        self.log_warn(f"Deleted {removed} selected file(s)")
+        if input:  self._sel_input  = None
+        else:      self._sel_output = None
+        self._clear_viewer()
+        self._refresh_all()
+
+    def _move_to_input(self):
+        sel = self._output_lb.curselection()
+        if not sel:
+            self.log_warn("No output files selected"); return
+        cfg = _cfg(); _ensure_dirs(cfg)
+        in_dir = Path(cfg["input_dir"])
+        moved = 0
+        for idx in sel:
+            if idx < len(self._output_files):
+                f = self._output_files[idx]
+                shutil.move(str(f), str(in_dir / f.name))
+                self.log_info(f"Moved to input/: {f.name}")
+                moved += 1
+        self.log_ok(f"{moved} file(s) moved to input/")
+        self._sel_output = None
         self._refresh_all()
 
     # ── File viewer ───────────────────────────────────────────────────────────
