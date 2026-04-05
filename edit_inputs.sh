@@ -366,12 +366,14 @@ format_entry() {
 
 # ─── DRAFT MODE ──────────────────────────────────────────────────────────────
 
-# Draft a .bin file: extract → __DRAFT_name.txt
+# Draft a .bin file: extract → __DRAFT_name.txt  (or __DRAFT_name~bin.txt on conflict)
 draft_bin() {
   local src="$1"
+  local draft_label="${2:-}"   # optional override stem (e.g. "name~bin")
   local filename; filename="$(basename "$src")"
   local base="${filename%.*}"
-  local draft_dst="$OUTPUT_DIR/__DRAFT_${base}.txt"
+  local stem="${draft_label:-${base}}"
+  local draft_dst="$OUTPUT_DIR/__DRAFT_${stem}.txt"
   local status="DRAFT" detail="" hash_a hash_b
 
   log "${CYAN}DRAFT${NC}  BIN→TXT  $filename"
@@ -381,7 +383,7 @@ draft_bin() {
   bin_to_txt "$src" "$draft_dst"
 
   local rows; rows=$(grep -c ' ' "$draft_dst" 2>/dev/null || echo 0)
-  local output_info="__DRAFT_${base}.txt  (${rows} rows)"
+  local output_info="__DRAFT_${stem}.txt  (${rows} rows)"
   log "       → ${CYAN}${output_info}${NC}"
 
   # Quick roundtrip check for the draft itself
@@ -400,12 +402,14 @@ draft_bin() {
   [[ "$status" != "FAIL" ]]
 }
 
-# Draft a .txt file: format-check + normalize → __DRAFT_name.txt
+# Draft a .txt file: format-check + normalize → __DRAFT_name.txt  (or __DRAFT_name~txt.txt on conflict)
 draft_txt() {
   local src="$1"
+  local draft_label="${2:-}"   # optional override stem (e.g. "name~txt")
   local filename; filename="$(basename "$src")"
   local base="${filename%.*}"
-  local draft_dst="$OUTPUT_DIR/__DRAFT_${base}.txt"
+  local stem="${draft_label:-${base}}"
+  local draft_dst="$OUTPUT_DIR/__DRAFT_${stem}.txt"
   local status="DRAFT" detail="" fmt_notes=""
 
   log "${CYAN}DRAFT${NC}  TXT      $filename"
@@ -423,13 +427,13 @@ draft_txt() {
   fi
 
   normalize_txt "$src" "$draft_dst"
-  log "       → ${CYAN}__DRAFT_${base}.txt${NC}"
+  log "       → ${CYAN}__DRAFT_${stem}.txt${NC}"
 
   local hash_a; hash_a=$(sha256 "$src")
   local hash_b; hash_b=$(sha256 "$draft_dst")
   local input_size; input_size="$(wc -l < "$src") lines"
 
-  DRAFT_ENTRIES+=("$(format_entry "TXT → DRAFT  [FORMAT CHECK]" "$filename" "__DRAFT_${base}.txt" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")")
+  DRAFT_ENTRIES+=("$(format_entry "TXT → DRAFT  [FORMAT CHECK]" "$filename" "__DRAFT_${stem}.txt" "$input_size" "$hash_a" "$hash_b" "$status" "$detail" "$fmt_notes")")
 }
 
 # Write the draft report
@@ -496,10 +500,10 @@ write_draft_report() {
 # Apply a single __DRAFT_*.txt → name.bin
 apply_draft() {
   local src="$1"
-  local filename; filename="$(basename "$src")"            # __DRAFT_name.txt
-  local base="${filename#__DRAFT_}"                        # name.txt
-  base="${base%.*}"                                        # name
-  local dst="$OUTPUT_DIR/${base}.bin"
+  local filename; filename="$(basename "$src")"            # __DRAFT_name.txt  or __DRAFT_name~bin.txt
+  local base="${filename#__DRAFT_}"                        # name.txt  or  name~bin.txt
+  base="${base%.*}"                                        # name  or  name~bin
+  local dst="$OUTPUT_DIR/${base}.bin"                      # name.bin  or  name~bin.bin
   local status="PASS" detail="" fmt_notes="" hash_a hash_b output_info input_size
 
   log "${CYAN}APPLY${NC}  __DRAFT_${base}.txt → ${base}.bin"
@@ -633,13 +637,47 @@ run_draft() {
     exit 0
   fi
 
+  # ── Detect naming conflicts (same base name in both .bin and .txt) ────────────
+  declare -A bin_bases txt_bases
+  for f in "${bin_files[@]}"; do
+    local b; b="$(basename "${f%.*}")"
+    bin_bases["$b"]="$f"
+  done
+  for f in "${txt_files[@]}"; do
+    local b; b="$(basename "${f%.*}")"
+    txt_bases["$b"]="$f"
+  done
+
+  local conflicts=()
+  for b in "${!bin_bases[@]}"; do
+    if [[ -n "${txt_bases[$b]:-}" ]]; then
+      conflicts+=("$b")
+    fi
+  done
+
+  if [[ ${#conflicts[@]} -gt 0 ]]; then
+    echo
+    warn "Naming conflict(s) detected — same base name in both .bin and .txt:"
+    for c in "${conflicts[@]}"; do
+      log "  ${YELLOW}${c}${NC}  →  both ${c}.bin and ${c}.txt present"
+      log "     Tagged drafts: ${CYAN}__DRAFT_${c}~bin.txt${NC} and ${CYAN}__DRAFT_${c}~txt.txt${NC}"
+      log "     Apply will produce: ${CYAN}${c}~bin.bin${NC} and ${CYAN}${c}~txt.bin${NC}  (diff them to verify)"
+    done
+  fi
+
   local drafted=0 failed=0
 
   if [[ ${#bin_files[@]} -gt 0 ]]; then
     header "Binary files — extracting to DRAFT text…"
     for f in "${bin_files[@]}"; do
       echo
-      if draft_bin "$f"; then
+      local b; b="$(basename "${f%.*}")"
+      local stem="$b"
+      # Tag stem if there's a conflict with a same-named .txt
+      if [[ -n "${txt_bases[$b]:-}" ]]; then
+        stem="${b}~bin"
+      fi
+      if draft_bin "$f" "$stem"; then
         (( drafted++ )) || true
       else
         (( failed++ )) || true
@@ -651,7 +689,13 @@ run_draft() {
     header "Text files — format-checking to DRAFT…"
     for f in "${txt_files[@]}"; do
       echo
-      draft_txt "$f"
+      local b; b="$(basename "${f%.*}")"
+      local stem="$b"
+      # Tag stem if there's a conflict with a same-named .bin
+      if [[ -n "${bin_bases[$b]:-}" ]]; then
+        stem="${b}~txt"
+      fi
+      draft_txt "$f" "$stem"
       (( drafted++ )) || true
     done
   fi
