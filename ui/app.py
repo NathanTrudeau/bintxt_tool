@@ -681,7 +681,7 @@ class BintxtApp(tk.Tk):
             try:
                 bin_to_txt(str(f), str(dst), endian, ws)
                 ok, h_orig, h_rt = verify_bin_to_txt(str(f), str(dst), endian, ws, tmp)
-                if ok:   self.log_ok(f"{dst.name}  {h_rt[:20]}..."); passed += 1
+                if ok:   self.log_ok(f"{dst.name}  {h_rt}"); passed += 1
                 else:    self.log_err(f"{f.name}  roundtrip mismatch"); failed += 1
             except Exception as e:
                 self.log_err(f"{f.name}  {e}"); failed += 1
@@ -694,7 +694,7 @@ class BintxtApp(tk.Tk):
                 if not ok_v: self.log_warn(f"{f.name}  {len(issues)} format issue(s)")
                 txt_to_bin(str(f), str(dst), endian, ws)
                 ok, h_bin, _ = verify_txt_to_bin(str(f), str(dst), endian, ws, tmp)
-                if ok:   self.log_ok(f"{dst.name}  {h_bin[:20]}..."); passed += 1
+                if ok:   self.log_ok(f"{dst.name}  {h_bin}"); passed += 1
                 else:    self.log_err(f"{f.name}  roundtrip mismatch"); failed += 1
             except Exception as e:
                 self.log_err(f"{f.name}  {e}"); failed += 1
@@ -765,7 +765,7 @@ class BintxtApp(tk.Tk):
                 txt_to_bin(str(f), str(dst), endian, ws)
                 ok, h_bin, _ = verify_txt_to_bin(str(f), str(dst), endian, ws, tmp)
                 if ok:
-                    self.log_ok(f"Verified  {h_bin[:20]}...")
+                    self.log_ok(f"Verified  {h_bin}")
                     f.unlink(); self.log_dim("DRAFT removed"); passed += 1
                 else:
                     self.log_err("Roundtrip mismatch -- DRAFT kept"); failed += 1
@@ -795,7 +795,7 @@ class BintxtApp(tk.Tk):
                 self.log_err(f"[{ftype}]  {f.name}  {err}")
                 fp_list.append((str(f), "ERROR", ftype, err))
             else:
-                self.log_dim(f"[{ftype}]  {f.name}  {h[:20]}...")
+                self.log_dim(f"[{ftype}]  {f.name}  {h}")
                 fp_list.append((str(f), h, ftype, ""))
 
         matches, singletons, _ = group_by_hash(fp_list)
@@ -803,7 +803,7 @@ class BintxtApp(tk.Tk):
         if matches:
             self.log_head(f"{len(matches)} match group(s):")
             for h, members in sorted(matches.items(), key=lambda x: -len(x[1])):
-                self.log_info(f"Group -- {len(members)} files  hash: {h[:16]}...")
+                self.log_info(f"Group -- {len(members)} files  hash: {h}")
                 for fname, ftype, _ in sorted(members):
                     self.log_dim(f"  [{ftype}]  {fname}")
         else:
@@ -921,7 +921,7 @@ class SettingsDialog(tk.Toplevel):
         self._update_preview()
 
         self.update_idletasks()
-        w, h = 720, 480
+        w, h = 900, 540
         px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
         py = parent.winfo_y() + (parent.winfo_height() - h) // 2
         self.geometry(f"{w}x{h}+{px}+{py}")
