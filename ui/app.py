@@ -400,7 +400,7 @@ class BintxtApp(tk.Tk):
         tk.Label(bar, textvariable=self._status_var, bg=SURFACE2, fg=FG_DIM,
                  font=UI_S).pack(side="left", padx=12)
 
-        self._sbtn(bar, "Open output/", self._open_output).pack(side="right", padx=8, pady=3)
+        self._sbtn(bar, "Open folder", self._open_output).pack(side="right", padx=8, pady=3)
 
         # Version watermark — centered
         tk.Label(bar,
@@ -800,7 +800,7 @@ class BintxtApp(tk.Tk):
     # ── Output folder ─────────────────────────────────────────────────────────
 
     def _open_output(self):
-        _open_folder(_cfg()["output_dir"])
+        _open_folder(str(REPO_ROOT))
 
     # ── Threaded runner ───────────────────────────────────────────────────────
 
