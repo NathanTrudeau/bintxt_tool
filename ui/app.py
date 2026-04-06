@@ -1032,7 +1032,7 @@ class SettingsDialog(tk.Toplevel):
         self._update_preview()
 
         self.update_idletasks()
-        w, h = 900, 680
+        w, h = 1020, 680
         px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
         py = parent.winfo_y() + (parent.winfo_height() - h) // 2
         self.geometry(f"{w}x{h}+{px}+{py}")
@@ -1050,7 +1050,7 @@ class SettingsDialog(tk.Toplevel):
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=0)
 
-        left  = tk.Frame(body, bg=BG, width=300)
+        left  = tk.Frame(body, bg=BG, width=360)
         left.pack(side="left", fill="y", padx=0)
         left.pack_propagate(False)
 
@@ -1135,7 +1135,7 @@ class SettingsDialog(tk.Toplevel):
                  bg=BG, fg=FG_DIM, font=UI_S, anchor="w").pack(anchor="w", padx=20, pady=(3, 0))
 
         # Presets — 3-column grid
-        tk.Label(parent, text="Presets", bg=BG, fg=FG_DIM, font=UI_SB,
+        tk.Label(parent, text="Word Presets", bg=BG, fg=FG_DIM, font=UI_SB,
                  anchor="w").pack(anchor="w", padx=16, pady=(14, 6))
 
         presets = [
