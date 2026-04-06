@@ -1127,6 +1127,9 @@ class SettingsDialog(tk.Toplevel):
         self._mk_btn(foot, "Cancel", self.destroy, danger=False).pack(side="right", padx=(4, 12), pady=6)
         self._mk_btn(foot, "Save",   self._save,   primary=True).pack(side="right", padx=4, pady=6)
 
+        tk.Label(foot, text="Written by: Nathan Trudeau", bg=SURFACE2, fg=FG_DIM,
+                 font=UI_S).place(relx=0.5, rely=0.5, anchor="center")
+
     def _build_controls(self, parent):
         pad = {"padx": 16, "pady": 0}
 
