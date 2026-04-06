@@ -4,7 +4,9 @@ Requires only Python standard library. Run from repo root: python3 ui/app.py
 """
 
 import os
+import platform
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -59,6 +61,20 @@ def _cfg():
 def _ensure_dirs(cfg):
     for k in ("input_dir", "output_dir", "report_dir"):
         Path(cfg[k]).mkdir(parents=True, exist_ok=True)
+
+def _open_folder(path: str):
+    """Open a folder in the native file manager (cross-platform)."""
+    p = str(path)
+    try:
+        if platform.system() == "Windows":
+            os.startfile(p)
+        elif platform.system() == "Darwin":
+            subprocess.Popen(["open", p])
+        else:
+            subprocess.Popen(["xdg-open", p])
+    except Exception:
+        pass
+
 
 def _border_h(parent, thick=1, color=BORDER):
     return tk.Frame(parent, bg=color, height=thick)
@@ -209,6 +225,17 @@ class BintxtApp(tk.Tk):
         hdr.pack_propagate(False)
         tk.Label(hdr, text=f"  {title}", bg=SURFACE2, fg=FG_MED,
                  font=UI_SB).pack(side="left", pady=4)
+
+        dir_key = "input_dir" if is_input else "output_dir"
+        folder_btn = tk.Label(
+            hdr, text="📂", bg=SURFACE2, fg=FG_DIM,
+            font=("Segoe UI Emoji", 11) if platform.system() == "Windows" else UI_S,
+            cursor="hand2",
+        )
+        folder_btn.pack(side="left", padx=(4, 0), pady=4)
+        folder_btn.bind("<Button-1>", lambda _e, k=dir_key: _open_folder(_cfg()[k]))
+        folder_btn.bind("<Enter>",    lambda _e, w=folder_btn: w.config(fg=FG))
+        folder_btn.bind("<Leave>",    lambda _e, w=folder_btn: w.config(fg=FG_DIM))
 
         if is_input:
             self._sbtn(hdr, "Add", self._browse_files).pack(side="right", padx=(0, 6), pady=4)
@@ -1032,7 +1059,7 @@ class SettingsDialog(tk.Toplevel):
         self._update_preview()
 
         self.update_idletasks()
-        w, h = 1020, 680
+        w, h = 1080, 680
         px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
         py = parent.winfo_y() + (parent.winfo_height() - h) // 2
         self.geometry(f"{w}x{h}+{px}+{py}")
@@ -1050,7 +1077,7 @@ class SettingsDialog(tk.Toplevel):
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True, padx=0)
 
-        left  = tk.Frame(body, bg=BG, width=360)
+        left  = tk.Frame(body, bg=BG, width=430)
         left.pack(side="left", fill="y", padx=0)
         left.pack_propagate(False)
 
@@ -1112,17 +1139,17 @@ class SettingsDialog(tk.Toplevel):
         tk.Label(parent, text="Address width", bg=BG, fg=FG_MED, font=UI_S,
                  anchor="w").pack(anchor="w", padx=16, pady=(12, 4))
         for val, lbl, sub in (
-            ("32", "32-bit", "8 hex digits  —  up to 4 GB  (standard config files)"),
-            ("64", "64-bit", "16 hex digits  —  up to 16 EB  (large firmware / ELF)"),
+            ("32", "32-bit", "8 hex digits — up to 4 GB\n(standard config files)"),
+            ("64", "64-bit", "16 hex digits — up to 16 EB\n(large firmware / ELF)"),
         ):
             r = tk.Frame(parent, bg=BG)
             r.pack(fill="x", padx=20, pady=2)
             tk.Radiobutton(r, text=lbl, variable=self._addr_bits, value=val,
                            bg=BG, fg=FG, selectcolor=SURFACE2,
                            activebackground=BG, activeforeground=FG,
-                           font=UI_S).pack(side="left")
+                           font=UI_S).pack(side="left", anchor="n")
             tk.Label(r, text=f"  —  {sub}", bg=BG, fg=FG_DIM,
-                     font=UI_S).pack(side="left")
+                     font=UI_S, justify="left").pack(side="left", anchor="n")
 
         # Word sizes — description below entry
         tk.Label(parent, text="Word sizes", bg=BG, fg=FG_MED, font=UI_S,
