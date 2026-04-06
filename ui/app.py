@@ -141,8 +141,6 @@ class BintxtApp(tk.Tk):
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build(self):
-        self._build_header()
-        _border_h(self, thick=1, color=BORDER).pack(fill="x")
         self._build_toolbar()
         _border_h(self, thick=2, color=BORDER).pack(fill="x")
         self._build_body()
@@ -166,10 +164,7 @@ class BintxtApp(tk.Tk):
         bar.pack(fill="x")
         bar.pack_propagate(False)
 
-        # Left: Actions
-        tk.Label(bar, text="Actions", bg=SURFACE2, fg=FG_DIM,
-                 font=UI_SB).pack(side="left", padx=(14, 6), pady=10)
-
+        # Left: action buttons
         for label, cmd, primary in [
             ("Convert",      self._run_convert, True),
             ("Draft",        self._run_draft,   False),
@@ -179,12 +174,10 @@ class BintxtApp(tk.Tk):
             bg = BTN_ACT if primary else BTN_BG
             self._tbtn(bar, label, cmd, bg=bg).pack(side="left", padx=3, pady=6)
 
-        # Settings (left, after actions)
-        _border_v(bar, thick=1, color=BORDER_S).pack(side="left", fill="y", padx=8, pady=8)
-        self._tbtn(bar, "⚙  Settings", self._open_settings).pack(side="left", padx=3, pady=6)
-
-        # Right: Save Log + Package (right-justified)
-        self._tbtn(bar, "📦  Package",  self._run_package).pack(side="right", padx=(3, 12), pady=6)
+        # Right: Save Log + Package + Settings
+        self._tbtn(bar, "⚙  Settings", self._open_settings).pack(side="right", padx=(3, 10), pady=6)
+        _border_v(bar, thick=1, color=BORDER_S).pack(side="right", fill="y", padx=6, pady=8)
+        self._tbtn(bar, "📦  Package",  self._run_package).pack(side="right", padx=3, pady=6)
         self._tbtn(bar, "💾  Save Log", self._save_log).pack(side="right", padx=3, pady=6)
         _border_v(bar, thick=1, color=BORDER_S).pack(side="right", fill="y", padx=6, pady=8)
 
