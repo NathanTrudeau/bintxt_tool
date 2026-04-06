@@ -156,8 +156,6 @@ Each row: `ADDRESS  WORD1  [WORD2  [WORD3 ...]]`
 |------|-------|
 | `bash` 4.0+ | macOS/Linux native; Windows requires Git Bash or WSL |
 | `python3` | Extraction, reconstruction, validation |
-| `sha256sum` | Linux — or `shasum` on macOS (auto-detected) |
-
 > **Windows users:** double-clicking `.sh` files won't work natively. Open **Git Bash** or **WSL**, `cd` to the repo, and run the scripts from there. Everything else works the same.
 
 ---

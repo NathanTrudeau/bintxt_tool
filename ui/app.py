@@ -93,6 +93,18 @@ class BintxtApp(tk.Tk):
         self.configure(bg=BG)
         self.minsize(1000, 650)
 
+        # App icon — resolves relative to this file so it works both
+        # when running from source and when frozen by PyInstaller
+        try:
+            _icon_dir = Path(__file__).parent / "assets"
+            if platform.system() == "Windows":
+                self.iconbitmap(str(_icon_dir / "icon.ico"))
+            else:
+                _img = tk.PhotoImage(file=str(_icon_dir / "icon_1024.png"))
+                self.iconphoto(True, _img)
+        except Exception:
+            pass  # no icon is fine
+
         self._cfg = _cfg()
         _ensure_dirs(self._cfg)
         self._sel_input  = None
@@ -147,17 +159,6 @@ class BintxtApp(tk.Tk):
         _border_h(self, thick=1, color=BORDER).pack(fill="x")
         self._build_statusbar()
 
-    def _build_header(self):
-        bar = tk.Frame(self, bg=SURFACE, height=46)
-        bar.pack(fill="x")
-        bar.pack_propagate(False)
-        tk.Label(bar, text="bintxt_tool", bg=SURFACE, fg=FG,
-                 font=UI_H).pack(side="left", padx=16)
-        cfg = self._cfg
-        layout = "+".join(f"{w}B" for w in cfg["word_sizes"])
-        info = f"layout: {layout}   ·   endian: {cfg['endian']}"
-        tk.Label(bar, text=info, bg=SURFACE, fg=FG_DIM,
-                 font=UI_S).pack(side="right", padx=16)
 
     def _build_toolbar(self):
         bar = tk.Frame(self, bg=SURFACE2, height=42)
@@ -761,14 +762,7 @@ class BintxtApp(tk.Tk):
     # ── Output folder ─────────────────────────────────────────────────────────
 
     def _open_output(self):
-        import subprocess
-        out = Path(_cfg()["output_dir"])
-        try:
-            if sys.platform == "win32":    os.startfile(str(out))
-            elif sys.platform == "darwin": subprocess.Popen(["open", str(out)])
-            else:                          subprocess.Popen(["xdg-open", str(out)])
-        except Exception as e:
-            self.log_err(f"Could not open output/: {e}")
+        _open_folder(_cfg()["output_dir"])
 
     # ── Threaded runner ───────────────────────────────────────────────────────
 

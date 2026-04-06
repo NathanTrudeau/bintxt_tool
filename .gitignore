@@ -12,3 +12,8 @@ output/reports/*
 !output/reports/example_*
 __pycache__/
 *.pyc
+
+# PyInstaller build artifacts
+dist/
+build/
+*.spec
