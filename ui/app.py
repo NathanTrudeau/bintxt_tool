@@ -163,6 +163,10 @@ class BintxtApp(tk.Tk):
             bg = BTN_ACT if primary else BTN_BG
             self._tbtn(bar, label, cmd, bg=bg).pack(side="left", padx=3, pady=6)
 
+        # Settings (left, after actions)
+        _border_v(bar, thick=1, color=BORDER_S).pack(side="left", fill="y", padx=8, pady=8)
+        self._tbtn(bar, "⚙  Settings", self._open_settings).pack(side="left", padx=3, pady=6)
+
         # Right: Save Log + Package (right-justified)
         self._tbtn(bar, "📦  Package",  self._run_package).pack(side="right", padx=(3, 12), pady=6)
         self._tbtn(bar, "💾  Save Log", self._save_log).pack(side="right", padx=3, pady=6)
@@ -845,6 +849,350 @@ class BintxtApp(tk.Tk):
                 self.log_dim(f"  + {src.name}")
 
         self.log_ok(f"Saved: {save_path}  ({len(selected)} files)")
+
+
+    def _open_settings(self):
+        SettingsDialog(self)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings Dialog
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Sample binary data for live preview (32 bytes)
+_PREVIEW_DATA = bytes([
+    0xDE, 0xAD, 0xBE, 0xEF,  0xCA, 0xFE, 0xBA, 0xBE,
+    0x01, 0x23, 0x45, 0x67,  0x89, 0xAB, 0xCD, 0xEF,
+    0x00, 0x00, 0x00, 0x00,  0xFF, 0xFF, 0xFF, 0xFF,
+    0x10, 0x20, 0x30, 0x40,  0x50, 0x60, 0x70, 0x80,
+])
+
+def _build_preview(word_sizes, endian):
+    """Generate a few sample hex rows from _PREVIEW_DATA using given config."""
+    try:
+        ws   = [int(x) for x in word_sizes if str(x).strip()]
+        if not ws or any(w not in (1, 2, 4, 8) for w in ws):
+            return "  (invalid word size — must be 1, 2, 4, or 8)"
+        if not (1 <= len(ws) <= 6):
+            return "  (1–6 words per row)"
+        stride = sum(ws)
+        data   = _PREVIEW_DATA
+        lines  = []
+        offset = 0
+        while offset < len(data) and len(lines) < 6:
+            parts = [f"{offset:08x}"]
+            cur   = offset
+            for w in ws:
+                chunk = data[cur:cur+w] if cur+w <= len(data) else data[cur:] + b"\x00"*(w-(len(data)-cur))
+                val   = int.from_bytes(chunk[:w], byteorder=endian)
+                parts.append(f"{val:0{w*2}x}")
+                cur  += w
+            lines.append("  " + "  ".join(parts))
+            offset += stride
+        lines.append(f"  {offset:08x}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"  (error: {e})"
+
+
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, parent: BintxtApp):
+        super().__init__(parent)
+        self._parent = parent
+        self.title("Settings")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()   # modal
+
+        cfg = _cfg()
+
+        # ── State vars ────────────────────────────────────────────────────────
+        self._endian      = tk.StringVar(value=cfg["endian"])
+        self._word_sizes  = tk.StringVar(value=" ".join(str(w) for w in cfg["word_sizes"]))
+        self._input_dir   = tk.StringVar(value=cfg["input_dir"])
+        self._output_dir  = tk.StringVar(value=cfg["output_dir"])
+        self._report_dir  = tk.StringVar(value=cfg["report_dir"])
+
+        # Trigger preview rebuild on any change
+        for v in (self._endian, self._word_sizes):
+            v.trace_add("write", lambda *_: self._update_preview())
+
+        self._build()
+        self._update_preview()
+
+        self.update_idletasks()
+        w, h = 720, 480
+        px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
+        py = parent.winfo_y() + (parent.winfo_height() - h) // 2
+        self.geometry(f"{w}x{h}+{px}+{py}")
+
+    def _build(self):
+        # Header
+        hdr = tk.Frame(self, bg=SURFACE, height=40)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="  Settings", bg=SURFACE, fg=FG,
+                 font=UI_B).pack(side="left", pady=8)
+        _border_h(self, thick=2, color=BORDER).pack(fill="x")
+
+        # Body: left = controls, right = preview
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="both", expand=True, padx=0)
+
+        left  = tk.Frame(body, bg=BG, width=300)
+        left.pack(side="left", fill="y", padx=0)
+        left.pack_propagate(False)
+
+        _border_v(body, thick=2, color=BORDER).pack(side="left", fill="y")
+
+        right = tk.Frame(body, bg=BG)
+        right.pack(side="left", fill="both", expand=True)
+
+        self._build_controls(left)
+        self._build_preview_panel(right)
+
+        # Footer
+        _border_h(self, thick=1, color=BORDER).pack(fill="x")
+        foot = tk.Frame(self, bg=SURFACE2, height=40)
+        foot.pack(fill="x")
+        foot.pack_propagate(False)
+
+        self._status = tk.StringVar(value="")
+        tk.Label(foot, textvariable=self._status, bg=SURFACE2, fg=GREEN,
+                 font=UI_S).pack(side="left", padx=12)
+
+        self._mk_btn(foot, "Cancel", self.destroy, danger=False).pack(side="right", padx=(4, 12), pady=6)
+        self._mk_btn(foot, "Save",   self._save,   primary=True).pack(side="right", padx=4, pady=6)
+
+    def _build_controls(self, parent):
+        pad = {"padx": 16, "pady": 0}
+
+        def section(text):
+            tk.Label(parent, text=text, bg=BG, fg=FG_DIM,
+                     font=UI_SB).pack(anchor="w", padx=16, pady=(14, 4))
+
+        def row(parent, label, widget_fn):
+            r = tk.Frame(parent, bg=BG)
+            r.pack(fill="x", **pad, pady=3)
+            tk.Label(r, text=label, bg=BG, fg=FG_MED, font=UI_S,
+                     width=12, anchor="w").pack(side="left")
+            widget_fn(r)
+
+        # ── Format ────────────────────────────────────────────────────────────
+        section("FORMAT")
+
+        # Endian
+        def _mk_endian(r):
+            for val, lbl in (("little", "little  (x86 / ARM)"), ("big", "big  (MIPS / PowerPC)")):
+                tk.Radiobutton(r, text=lbl, variable=self._endian, value=val,
+                               bg=BG, fg=FG, selectcolor=SURFACE2,
+                               activebackground=BG, activeforeground=FG,
+                               font=UI_S).pack(side="left", padx=(0, 10))
+
+        tk.Label(parent, text="Byte order", bg=BG, fg=FG_MED, font=UI_S,
+                 anchor="w").pack(anchor="w", padx=16, pady=(2, 2))
+        r = tk.Frame(parent, bg=BG)
+        r.pack(fill="x", padx=16, pady=(0, 6))
+        _mk_endian(r)
+
+        # Word sizes
+        tk.Label(parent, text="Word sizes", bg=BG, fg=FG_MED, font=UI_S,
+                 anchor="w").pack(anchor="w", padx=16, pady=(4, 2))
+        ws_row = tk.Frame(parent, bg=BG)
+        ws_row.pack(fill="x", padx=16, pady=(0, 2))
+
+        ws_entry = tk.Entry(ws_row, textvariable=self._word_sizes,
+                            bg=SURFACE2, fg=FG, insertbackground=FG,
+                            font=MONO, relief="flat", width=18)
+        ws_entry.pack(side="left")
+        tk.Label(ws_row, text="  bytes per word, space-separated",
+                 bg=BG, fg=FG_DIM, font=UI_S).pack(side="left")
+
+        # Quick presets
+        tk.Label(parent, text="Presets", bg=BG, fg=FG_DIM, font=UI_SB,
+                 anchor="w").pack(anchor="w", padx=16, pady=(10, 4))
+        presets_frame = tk.Frame(parent, bg=BG)
+        presets_frame.pack(fill="x", padx=16, pady=(0, 4))
+        presets = [
+            ("32-bit", "4"),
+            ("64-bit", "8"),
+            ("32+16+8", "4 2 1"),
+            ("4×16-bit", "2 2 2 2"),
+            ("2×32-bit", "4 4"),
+        ]
+        for lbl, val in presets:
+            b = tk.Button(presets_frame, text=lbl, bg=BTN_BG, fg=FG_MED,
+                          font=UI_S, relief="flat", borderwidth=0,
+                          padx=8, pady=2, cursor="hand2",
+                          command=lambda v=val: self._word_sizes.set(v))
+            b.pack(side="left", padx=(0, 4), pady=2)
+            b.bind("<Enter>", lambda e, b=b: b.configure(bg=BTN_HOV))
+            b.bind("<Leave>", lambda e, b=b: b.configure(bg=BTN_BG))
+
+        # ── Directories ────────────────────────────────────────────────────────
+        section("DIRECTORIES")
+
+        for label, var, key in [
+            ("Input",   self._input_dir,  "input_dir"),
+            ("Output",  self._output_dir, "output_dir"),
+            ("Reports", self._report_dir, "report_dir"),
+        ]:
+            dr = tk.Frame(parent, bg=BG)
+            dr.pack(fill="x", padx=16, pady=3)
+            tk.Label(dr, text=label, bg=BG, fg=FG_MED, font=UI_S,
+                     width=8, anchor="w").pack(side="left")
+            e = tk.Entry(dr, textvariable=var, bg=SURFACE2, fg=FG,
+                         insertbackground=FG, font=UI_S, relief="flat")
+            e.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            b = tk.Button(dr, text="Browse", bg=BTN_BG, fg=FG_MED, font=UI_S,
+                          relief="flat", borderwidth=0, padx=6, pady=1,
+                          cursor="hand2",
+                          command=lambda v=var: self._browse_dir(v))
+            b.pack(side="left")
+            b.bind("<Enter>", lambda e, b=b: b.configure(bg=BTN_HOV))
+            b.bind("<Leave>", lambda e, b=b: b.configure(bg=BTN_BG))
+
+    def _build_preview_panel(self, parent):
+        phdr = tk.Frame(parent, bg=SURFACE2, height=28)
+        phdr.pack(fill="x")
+        phdr.pack_propagate(False)
+        tk.Label(phdr, text="  FORMAT PREVIEW", bg=SURFACE2, fg=FG_MED,
+                 font=UI_SB).pack(side="left", pady=4)
+        self._preview_info = tk.StringVar(value="")
+        tk.Label(phdr, textvariable=self._preview_info, bg=SURFACE2, fg=FG_DIM,
+                 font=UI_S).pack(side="right", padx=10)
+
+        _border_h(parent, thick=2, color=BORDER).pack(fill="x")
+
+        tk.Label(parent, text="  address  →  word columns (sample data)",
+                 bg=BG, fg=FG_DIM, font=UI_S, anchor="w").pack(fill="x", pady=(8, 2))
+
+        self._preview_text = tk.Text(
+            parent, bg=BG, fg=CYAN, font=MONO,
+            relief="flat", borderwidth=0, state="disabled", wrap="none",
+            padx=14, pady=6, height=8,
+        )
+        self._preview_text.pack(fill="x", padx=0)
+        self._preview_text.tag_configure("addr", foreground=FG_DIM)
+        self._preview_text.tag_configure("val",  foreground=CYAN)
+        self._preview_text.tag_configure("err",  foreground=RED)
+
+        _border_h(parent, thick=1, color=BORDER_S).pack(fill="x", pady=(8, 0))
+        tk.Label(parent,
+                 text="  Each row:  ADDRESS(8 hex)  WORD1  [WORD2 ...]  \n"
+                      "  Final line: address-only end marker\n"
+                      "  Values are width = word_size × 2 hex digits",
+                 bg=BG, fg=FG_DIM, font=UI_S, justify="left", anchor="w",
+                 ).pack(fill="x", padx=14, pady=8)
+
+    def _update_preview(self):
+        try:
+            ws_raw = [x for x in self._word_sizes.get().split() if x]
+            ws     = [int(x) for x in ws_raw]
+            endian = self._endian.get()
+            stride = sum(ws)
+            self._preview_info.set(
+                f"layout: {'+'.join(str(w)+'B' for w in ws)}   stride: {stride}B   endian: {endian}"
+            )
+        except Exception:
+            ws_raw = []
+            self._preview_info.set("")
+
+        preview = _build_preview(
+            [x for x in self._word_sizes.get().split() if x],
+            self._endian.get()
+        )
+
+        self._preview_text.configure(state="normal")
+        self._preview_text.delete("1.0", "end")
+
+        if preview.startswith("  ("):
+            self._preview_text.insert("end", preview, "err")
+        else:
+            for line in preview.splitlines():
+                parts = line.split()
+                if not parts:
+                    self._preview_text.insert("end", "\n"); continue
+                self._preview_text.insert("end", f"  {parts[0]}", "addr")
+                if len(parts) > 1:
+                    self._preview_text.insert("end", "    ")
+                    self._preview_text.insert("end", "  ".join(parts[1:]), "val")
+                self._preview_text.insert("end", "\n")
+
+        self._preview_text.configure(state="disabled")
+
+    def _browse_dir(self, var):
+        d = filedialog.askdirectory(title="Select directory",
+                                    initialdir=var.get())
+        if d:
+            var.set(d)
+
+    def _save(self):
+        # Validate
+        try:
+            ws = [int(x) for x in self._word_sizes.get().split() if x]
+            if not ws:
+                raise ValueError("At least one word size required")
+            if any(w not in (1, 2, 4, 8) for w in ws):
+                raise ValueError("Word sizes must be 1, 2, 4, or 8")
+            if len(ws) > 6:
+                raise ValueError("Maximum 6 words per row")
+        except ValueError as e:
+            self._status.set(f"Error: {e}")
+            return
+
+        endian = self._endian.get()
+        if endian not in ("little", "big"):
+            self._status.set("Error: endian must be little or big"); return
+
+        cfg_path = REPO_ROOT / "cfg" / "config.sh"
+
+        # Make dirs relative to repo root where possible
+        def _rel(p):
+            try:   return str(Path(p).relative_to(REPO_ROOT))
+            except: return p
+
+        content = (
+            f'#!/usr/bin/env bash\n'
+            f'# bintxt_tool configuration — edited via UI settings\n\n'
+            f'ENDIAN="{endian}"\n\n'
+            f'# Word sizes per row (bytes each — must be 1, 2, 4, or 8)\n'
+            f'# Examples: (4)  (4 4)  (4 2 1)  (2 2 2 2)\n'
+            f'WORD_SIZES=({" ".join(str(w) for w in ws)})\n\n'
+            f'INPUT_DIR="{_rel(self._input_dir.get())}"\n'
+            f'OUTPUT_DIR="{_rel(self._output_dir.get())}"\n'
+            f'REPORT_DIR="{_rel(self._report_dir.get())}"\n'
+        )
+
+        cfg_path.write_text(content, encoding="utf-8")
+
+        # Refresh parent header
+        self._parent._cfg = _cfg()
+        self._parent._refresh_all()
+
+        # Update header label
+        layout = "+".join(f"{w}B" for w in ws)
+        info   = f"layout: {layout}   ·   endian: {endian}"
+        # Rebuild header (simplest: destroy + rebuild)
+        # Instead just log the change and note restart for header
+        self._parent.log_ok(f"Settings saved  —  layout: {layout}  endian: {endian}")
+
+        self._status.set("Saved.")
+        self.after(800, self.destroy)
+
+    def _mk_btn(self, parent, text, cmd, primary=False, danger=False):
+        bg = BTN_ACT if primary else ("#3a1f1f" if danger else BTN_BG)
+        fg = FG if primary else (RED if danger else FG_MED)
+        hov = BTN_HOV
+        wrap = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
+        b = tk.Button(wrap, text=text, command=cmd,
+                      bg=bg, fg=fg, activebackground=hov, activeforeground=FG,
+                      font=UI, relief="flat", borderwidth=0,
+                      padx=14, pady=3, cursor="hand2")
+        b.pack()
+        b.bind("<Enter>", lambda _: b.configure(bg=hov))
+        b.bind("<Leave>", lambda _: b.configure(bg=bg))
+        return wrap
 
 
 if __name__ == "__main__":
