@@ -18,6 +18,10 @@ from tkinter import filedialog, messagebox, ttk
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# ─── Version ──────────────────────────────────────────────────────────────────
+UI_VERSION  = "v1.0.0"   # update on UI releases only
+CLI_VERSION = "v1.4.1"   # update when shipping a new CLI core tag
+
 
 def _asset_path(name: str) -> Path:
     """Resolve a ui/assets/<name> path — works both from source and PyInstaller frozen."""
@@ -380,10 +384,17 @@ class BintxtApp(tk.Tk):
         bar = tk.Frame(self, bg=SURFACE2, height=26)
         bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
+
         self._status_var = tk.StringVar(value="Ready")
         tk.Label(bar, textvariable=self._status_var, bg=SURFACE2, fg=FG_DIM,
                  font=UI_S).pack(side="left", padx=12)
+
         self._sbtn(bar, "Open output/", self._open_output).pack(side="right", padx=8, pady=3)
+
+        # Version watermark — centered
+        tk.Label(bar,
+                 text=f"UI {UI_VERSION}   ·   core {CLI_VERSION}",
+                 bg=SURFACE2, fg=FG_DIM, font=UI_S).place(relx=0.5, rely=0.5, anchor="center")
 
     # ── Widget factories ──────────────────────────────────────────────────────
 
