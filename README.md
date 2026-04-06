@@ -18,10 +18,10 @@ python3 ui/app.py
 
 **Build a standalone executable:**
 ```bash
-pip install pyinstaller
+pip install --upgrade pyinstaller
 
-./build.sh          # Linux / macOS  →  ./bintxt_tool    (repo root)
-build.bat           # Windows        →  bintxt_tool.exe  (repo root)
+./build.sh          # Linux / macOS  →  ./bintxt_tool_v1-0-0    (repo root)
+build.bat           # Windows        →  bintxt_tool_v1-0-0.exe  (repo root)
 ```
 
 The executable lands in the **repo root** and must be run from there — it finds `cfg\`, `input\`, and `output\` relative to itself.

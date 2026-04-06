@@ -14,8 +14,7 @@ __pycache__/
 *.pyc
 
 # PyInstaller build artifacts
-dist/
 build/
 *.spec
-bintxt_tool.exe
-bintxt_tool
+bintxt_tool_v*.exe
+bintxt_tool_v*
