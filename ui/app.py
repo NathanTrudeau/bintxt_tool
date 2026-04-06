@@ -921,7 +921,7 @@ class SettingsDialog(tk.Toplevel):
         self._update_preview()
 
         self.update_idletasks()
-        w, h = 900, 540
+        w, h = 900, 680
         px = parent.winfo_x() + (parent.winfo_width()  - w) // 2
         py = parent.winfo_y() + (parent.winfo_height() - h) // 2
         self.geometry(f"{w}x{h}+{px}+{py}")
@@ -981,51 +981,62 @@ class SettingsDialog(tk.Toplevel):
         # ── Format ────────────────────────────────────────────────────────────
         section("FORMAT")
 
-        # Endian
-        def _mk_endian(r):
-            for val, lbl in (("little", "little  (x86 / ARM)"), ("big", "big  (MIPS / PowerPC)")):
-                tk.Radiobutton(r, text=lbl, variable=self._endian, value=val,
-                               bg=BG, fg=FG, selectcolor=SURFACE2,
-                               activebackground=BG, activeforeground=FG,
-                               font=UI_S).pack(side="left", padx=(0, 10))
-
+        # Endian — stacked vertically
         tk.Label(parent, text="Byte order", bg=BG, fg=FG_MED, font=UI_S,
-                 anchor="w").pack(anchor="w", padx=16, pady=(2, 2))
-        r = tk.Frame(parent, bg=BG)
-        r.pack(fill="x", padx=16, pady=(0, 6))
-        _mk_endian(r)
+                 anchor="w").pack(anchor="w", padx=16, pady=(2, 4))
+        for val, lbl, sub in (
+            ("little", "little-endian", "x86 / ARM"),
+            ("big",    "big-endian",    "MIPS / PowerPC"),
+        ):
+            r = tk.Frame(parent, bg=BG)
+            r.pack(fill="x", padx=20, pady=2)
+            tk.Radiobutton(r, text=lbl, variable=self._endian, value=val,
+                           bg=BG, fg=FG, selectcolor=SURFACE2,
+                           activebackground=BG, activeforeground=FG,
+                           font=UI_S).pack(side="left")
+            tk.Label(r, text=f"  —  {sub}", bg=BG, fg=FG_DIM,
+                     font=UI_S).pack(side="left")
 
-        # Word sizes
+        # Word sizes — description below entry
         tk.Label(parent, text="Word sizes", bg=BG, fg=FG_MED, font=UI_S,
-                 anchor="w").pack(anchor="w", padx=16, pady=(4, 2))
-        ws_row = tk.Frame(parent, bg=BG)
-        ws_row.pack(fill="x", padx=16, pady=(0, 2))
-
-        ws_entry = tk.Entry(ws_row, textvariable=self._word_sizes,
+                 anchor="w").pack(anchor="w", padx=16, pady=(14, 4))
+        ws_entry = tk.Entry(parent, textvariable=self._word_sizes,
                             bg=SURFACE2, fg=FG, insertbackground=FG,
-                            font=MONO, relief="flat", width=18)
-        ws_entry.pack(side="left")
-        tk.Label(ws_row, text="  bytes per word, space-separated",
-                 bg=BG, fg=FG_DIM, font=UI_S).pack(side="left")
+                            font=MONO, relief="flat", width=22)
+        ws_entry.pack(anchor="w", padx=20)
+        tk.Label(parent, text="bytes per word, space-separated  (1 2 4 or 8 only)",
+                 bg=BG, fg=FG_DIM, font=UI_S, anchor="w").pack(anchor="w", padx=20, pady=(3, 0))
 
-        # Quick presets
+        # Presets — 3-column grid
         tk.Label(parent, text="Presets", bg=BG, fg=FG_DIM, font=UI_SB,
-                 anchor="w").pack(anchor="w", padx=16, pady=(10, 4))
-        presets_frame = tk.Frame(parent, bg=BG)
-        presets_frame.pack(fill="x", padx=16, pady=(0, 4))
+                 anchor="w").pack(anchor="w", padx=16, pady=(14, 6))
+
         presets = [
-            ("32-bit", "4"),
-            ("64-bit", "8"),
-            ("32+16+8", "4 2 1"),
-            ("4×16-bit", "2 2 2 2"),
-            ("2×32-bit", "4 4"),
+            ("32-bit",     "4"),
+            ("64-bit",     "8"),
+            ("8-bit",      "1"),
+            ("2×32-bit",   "4 4"),
+            ("4×16-bit",   "2 2 2 2"),
+            ("32+16+8",    "4 2 1"),
+            ("16+8",       "2 1"),
+            ("32+8",       "4 1"),
+            ("2×16-bit",   "2 2"),
         ]
-        for lbl, val in presets:
-            b = tk.Button(presets_frame, text=lbl, bg=BTN_BG, fg=FG_MED,
+
+        COLS = 3
+        grid = tk.Frame(parent, bg=BG)
+        grid.pack(fill="x", padx=16, pady=(0, 6))
+        for col in range(COLS):
+            grid.columnconfigure(col, weight=1)
+
+        for i, (lbl, val) in enumerate(presets):
+            row_idx = i // COLS
+            col_idx = i %  COLS
+            b = tk.Button(grid, text=lbl, bg=BTN_BG, fg=FG_MED,
                           font=UI_S, relief="flat", borderwidth=0,
-                          padx=8, pady=2, cursor="hand2",
+                          padx=0, pady=4, cursor="hand2",
                           command=lambda v=val: self._word_sizes.set(v))
-            b.pack(side="left", padx=(0, 4), pady=2)
+            b.grid(row=row_idx, column=col_idx, sticky="ew", padx=3, pady=3)
             b.bind("<Enter>", lambda e, b=b: b.configure(bg=BTN_HOV))
             b.bind("<Leave>", lambda e, b=b: b.configure(bg=BTN_BG))
 
