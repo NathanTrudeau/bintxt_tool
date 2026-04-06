@@ -31,6 +31,12 @@ ENDIAN="little"
 #   00000007 12345678 0001 ff
 WORD_SIZES=(4)
 
+# ─── Address Width ────────────────────────────────────────────────────────────
+# Number of bits used for memory addresses in the binary.
+#   32 — 32-bit addresses (8 hex digits)   e.g. 00000000  (default)
+#   64 — 64-bit addresses (16 hex digits)  e.g. 0000000000000000
+ADDRESS_BITS=32
+
 # ─── Folders ──────────────────────────────────────────────────────────────────
 # Paths are relative to the script's location (bintxt_tool/).
 INPUT_DIR="input"

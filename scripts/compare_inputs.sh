@@ -34,6 +34,8 @@ if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
   WORD_SIZES=("$WORD_SIZE")
 fi
 
+ADDRESS_BITS="${ADDRESS_BITS:-32}"
+
 INPUT_DIR="$REPO_DIR/$INPUT_DIR"
 OUTPUT_DIR="$REPO_DIR/$OUTPUT_DIR"
 REPORT_DIR="$REPO_DIR/$REPORT_DIR"
@@ -105,6 +107,7 @@ write_report() {
     echo "  --------------------------------"
     echo "  Word layout : ${LAYOUT_LABEL}  (${#WORD_SIZES[@]} word(s), ${STRIDE}B stride)"
     echo "  Byte order  : $ENDIAN-endian"
+    echo "  Address bits: $ADDRESS_BITS-bit"
     echo "  Input dir   : $INPUT_DIR"
     echo "  Output dir  : $OUTPUT_DIR  (reviewed files moved here)"
     echo "  Report dir  : $REPORT_DIR"
@@ -167,7 +170,7 @@ main() {
     log "${CYAN}${type_label}${NC}  $fname"
 
     local fp_out fp_status fp_hash fp_rest
-    if fp_out=$(python3 "$CORE_COMPARE" fingerprint "$f" "$TEMP_DIR" "$ENDIAN" "${WORD_SIZES[@]}" 2>&1); then
+    if fp_out=$(python3 "$CORE_COMPARE" fingerprint "$f" "$TEMP_DIR" "$ENDIAN" "$ADDRESS_BITS" "${WORD_SIZES[@]}" 2>&1); then
       read -r fp_status fp_hash fp_rest <<< "$fp_out"
       if [[ "$fp_status" == "OK" ]]; then
         fp_paths+=("$f")
