@@ -24,16 +24,17 @@ import tempfile
 
 # ─── Low-level conversion ─────────────────────────────────────────────────────
 
-def bin_to_txt(src: str, dst: str, endian: str, word_sizes: list[int]) -> None:
+def bin_to_txt(src: str, dst: str, endian: str, word_sizes: list[int], address_bits: int = 32) -> None:
     """Extract a binary file to hex text format."""
-    stride = sum(word_sizes)
+    stride   = sum(word_sizes)
+    addr_w   = address_bits // 4   # hex digits for address field
     with open(src, "rb") as f:
         data = f.read()
 
     lines = []
     offset = 0
     while offset < len(data):
-        parts = [f"{offset:08x}"]
+        parts = [f"{offset:0{addr_w}x}"]
         cur = offset
         for ws in word_sizes:
             end = cur + ws
@@ -43,7 +44,7 @@ def bin_to_txt(src: str, dst: str, endian: str, word_sizes: list[int]) -> None:
             cur += ws
         lines.append(" ".join(parts))
         offset += stride
-    lines.append(f"{offset:08x}")
+    lines.append(f"{offset:0{addr_w}x}")
 
     with open(dst, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -145,9 +146,10 @@ def validate_txt_format(src: str, endian: str, word_sizes: list[int]) -> tuple[b
     return (len(issues) == 0, issues)
 
 
-def normalize_txt(src: str, dst: str, endian: str, word_sizes: list[int]) -> None:
+def normalize_txt(src: str, dst: str, endian: str, word_sizes: list[int], address_bits: int = 32) -> None:
     """Normalize a .txt file to canonical address-padded format."""
     n_words = len(word_sizes)
+    addr_w  = address_bits // 4
     lines_out = []
 
     with open(src) as f:
@@ -158,14 +160,14 @@ def normalize_txt(src: str, dst: str, endian: str, word_sizes: list[int]) -> Non
             parts = line.split()
             if len(parts) == 1:
                 try:
-                    lines_out.append(f"{int(parts[0], 16):08x}")
+                    lines_out.append(f"{int(parts[0], 16):0{addr_w}x}")
                 except ValueError:
                     lines_out.append(line)
                 continue
             if len(parts) >= n_words + 1:
                 try:
                     addr = int(parts[0], 16)
-                    row = [f"{addr:08x}"]
+                    row = [f"{addr:0{addr_w}x}"]
                     for i, ws in enumerate(word_sizes):
                         val = int(parts[i + 1], 16) if i + 1 < len(parts) else 0
                         row.append(f"{val:0{ws * 2}x}")
@@ -266,10 +268,12 @@ def _cli():
     cmd = sys.argv[1]
 
     if cmd == "bin_to_txt":
-        # bin_to_txt <src> <dst> <endian> <ws...>
+        # bin_to_txt <src> <dst> <endian> <addr_bits> <ws...>
         src, dst, endian = sys.argv[2], sys.argv[3], sys.argv[4]
-        ws = [int(x) for x in sys.argv[5:]]
-        bin_to_txt(src, dst, endian, ws)
+        addr_bits = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] in ("32","64") else 32
+        ws_start  = 6 if addr_bits in (32,64) and len(sys.argv) > 5 and sys.argv[5] in ("32","64") else 5
+        ws = [int(x) for x in sys.argv[ws_start:]]
+        bin_to_txt(src, dst, endian, ws, addr_bits)
 
     elif cmd == "txt_to_bin":
         # txt_to_bin <src> <dst> <endian> <ws...>

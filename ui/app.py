@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -265,6 +265,17 @@ class BintxtApp(tk.Tk):
         tk.Label(vhdr, textvariable=self._viewer_title, bg=SURFACE2, fg=FG_MED,
                  font=UI_SB, anchor="w").pack(side="left", padx=10, pady=4)
 
+        # Edit / Save / Cancel buttons (shown only for editable .txt files)
+        self._edit_cancel_btn = self._sbtn(vhdr, "Cancel", self._cancel_edit)
+        self._edit_save_btn   = self._sbtn(vhdr, "Save",   self._save_edit)
+        self._edit_toggle_btn = self._sbtn(vhdr, "Edit",   self._start_edit)
+        # Pack right-to-left so order reads: Edit | Save | Cancel
+        self._edit_cancel_btn.pack(side="right", padx=(0, 6), pady=4)
+        self._edit_save_btn.pack(side="right",   padx=(0, 3), pady=4)
+        self._edit_toggle_btn.pack(side="right", padx=(0, 6), pady=4)
+        self._edit_cancel_btn.pack_forget()
+        self._edit_save_btn.pack_forget()
+
         self._viewer_info = tk.StringVar(value="")
         tk.Label(vhdr, textvariable=self._viewer_info, bg=SURFACE2, fg=FG_DIM,
                  font=UI_S).pack(side="right", padx=10)
@@ -292,6 +303,10 @@ class BintxtApp(tk.Tk):
         self._viewer.tag_configure("addr", foreground=FG_DIM)
         self._viewer.tag_configure("val",  foreground=CYAN)
         self._viewer.tag_configure("note", foreground=FG_DIM, font=UI_S)
+        self._viewer.tag_configure("warn_line", background="#2a2010")
+
+        self._editing_file  = None   # Path currently being edited
+        self._editing       = False
 
     def _build_log_panel(self, parent):
         hdr = tk.Frame(parent, bg=SURFACE2, height=28)
@@ -587,47 +602,141 @@ class BintxtApp(tk.Tk):
     # ── File viewer ───────────────────────────────────────────────────────────
 
     def _clear_viewer(self, msg="Select a file to preview"):
+        self._editing = False
+        self._editing_file = None
         self._viewer.configure(state="normal")
         self._viewer.delete("1.0", "end")
         if msg:
             self._viewer.insert("end", f"\n  {msg}", "note")
         self._viewer.configure(state="disabled")
+        self._viewer.configure(bg=BG)
         self._viewer_title.set(msg)
         self._viewer_info.set("")
+        self._edit_toggle_btn.pack_forget()
+        self._edit_save_btn.pack_forget()
+        self._edit_cancel_btn.pack_forget()
 
     def _preview(self, path: Path):
+        # Cancel any active edit
+        if self._editing:
+            self._cancel_edit()
+
         cfg = _cfg()
-        endian, ws = cfg["endian"], cfg["word_sizes"]
+        endian, ws, ab = cfg["endian"], cfg["word_sizes"], cfg.get("address_bits", 32)
         self._viewer_title.set(path.name)
-        self._viewer.configure(state="normal")
+        self._viewer.configure(state="normal", bg=BG)
         self._viewer.delete("1.0", "end")
 
+        is_txt = path.suffix.lower() == ".txt"
+
         try:
-            if path.suffix.lower() == ".bin":
+            if not is_txt:
                 tmp = tempfile.mktemp(suffix=".txt")
-                bin_to_txt(str(path), tmp, endian, ws)
+                bin_to_txt(str(path), tmp, endian, ws, ab)
                 content = Path(tmp).read_text()
                 Path(tmp).unlink(missing_ok=True)
-                self._viewer_info.set(f"{path.stat().st_size} B  ·  binary (extracted view)")
+                self._viewer_info.set(f"{path.stat().st_size} B  ·  binary (extracted view — read only)")
             else:
                 content = path.read_text(errors="replace")
                 lines   = content.splitlines()
                 self._viewer_info.set(f"{path.stat().st_size} B  ·  {len(lines)} lines")
 
-            for line in content.splitlines():
-                parts = line.split()
-                if not parts:
-                    self._viewer.insert("end", "\n"); continue
-                self._viewer.insert("end", f"  {parts[0]}", "addr")
-                if len(parts) > 1:
-                    self._viewer.insert("end", "    ")
-                    self._viewer.insert("end", "  ".join(parts[1:]), "val")
-                self._viewer.insert("end", "\n")
+            self._render_hex(content)
 
         except Exception as e:
             self._viewer.insert("end", f"\n  Error: {e}", "note")
 
         self._viewer.configure(state="disabled")
+        self._editing_file = path if is_txt else None
+
+        # Show Edit only for .txt files
+        self._edit_save_btn.pack_forget()
+        self._edit_cancel_btn.pack_forget()
+        if is_txt:
+            self._edit_toggle_btn.pack(side="right", padx=(0, 6), pady=4)
+        else:
+            self._edit_toggle_btn.pack_forget()
+
+    def _render_hex(self, content: str):
+        """Render hex text with address/value coloring."""
+        for line in content.splitlines():
+            parts = line.split()
+            if not parts:
+                self._viewer.insert("end", "\n"); continue
+            self._viewer.insert("end", f"  {parts[0]}", "addr")
+            if len(parts) > 1:
+                self._viewer.insert("end", "    ")
+                self._viewer.insert("end", "  ".join(parts[1:]), "val")
+            self._viewer.insert("end", "\n")
+
+    # ── Inline editor ─────────────────────────────────────────────────────────
+
+    def _start_edit(self):
+        if not self._editing_file:
+            return
+        self._editing = True
+        self._viewer.configure(state="normal", bg=SURFACE)
+
+        # Swap Edit → Save + Cancel
+        self._edit_toggle_btn.pack_forget()
+        self._edit_save_btn.pack(side="right",   padx=(0, 3), pady=4)
+        self._edit_cancel_btn.pack(side="right", padx=(0, 6), pady=4)
+
+        self._viewer_info.set("editing — format validated on save")
+        self._viewer.focus_set()
+
+    def _cancel_edit(self):
+        if not self._editing_file:
+            return
+        self._editing = False
+        # Restore from disk
+        self._preview(self._editing_file)
+
+    def _save_edit(self):
+        if not self._editing_file:
+            return
+        cfg    = _cfg()
+        endian = cfg["endian"]
+        ws     = cfg["word_sizes"]
+        content = self._viewer.get("1.0", "end-1c")
+
+        # Validate
+        import tempfile as _tmp
+        tmp_path = Path(_tmp.mktemp(suffix=".txt"))
+        tmp_path.write_text(content, encoding="utf-8")
+        ok, issues = validate_txt_format(str(tmp_path), endian, ws)
+        tmp_path.unlink(missing_ok=True)
+
+        # Highlight problem lines
+        self._viewer.tag_remove("warn_line", "1.0", "end")
+        if issues:
+            # Parse line numbers from issue strings
+            for issue in issues:
+                try:
+                    ln = int(issue.split("line ")[1].split(":")[0])
+                    self._viewer.tag_add("warn_line", f"{ln}.0", f"{ln}.end")
+                except Exception:
+                    pass
+            self._viewer_info.set(f"  {len(issues)} format issue(s) — highlighted  (save anyway?)")
+            # Give user a moment to see, then save anyway after confirm
+            if not messagebox.askyesno(
+                "Format Issues",
+                f"{len(issues)} format issue(s) found:\n\n" +
+                "\n".join(issues[:8]) +
+                ("\n..." if len(issues) > 8 else "") +
+                "\n\nSave anyway?",
+                parent=self
+            ):
+                return
+
+        # Write
+        self._editing_file.write_text(content, encoding="utf-8")
+        self.log_ok(f"Saved: {self._editing_file.name}")
+        self._editing = False
+        self._refresh_all()
+
+        # Return to read view
+        self._preview(self._editing_file)
 
     # ── Output folder ─────────────────────────────────────────────────────────
 
@@ -664,7 +773,7 @@ class BintxtApp(tk.Tk):
     def _do_convert(self):
         cfg = _cfg(); _ensure_dirs(cfg)
         in_dir, out_dir = Path(cfg["input_dir"]), Path(cfg["output_dir"])
-        endian, ws = cfg["endian"], cfg["word_sizes"]
+        endian, ws, ab = cfg["endian"], cfg["word_sizes"], cfg.get("address_bits", 32)
         tmp = tempfile.mkdtemp()
 
         bins = sorted(in_dir.glob("*.bin"))
@@ -679,7 +788,7 @@ class BintxtApp(tk.Tk):
             dst = out_dir / (f.stem + ".txt")
             self.log_info(f"EXTRACT  {f.name}")
             try:
-                bin_to_txt(str(f), str(dst), endian, ws)
+                bin_to_txt(str(f), str(dst), endian, ws, ab)
                 ok, h_orig, h_rt = verify_bin_to_txt(str(f), str(dst), endian, ws, tmp)
                 if ok:   self.log_ok(f"{dst.name}  {h_rt}"); passed += 1
                 else:    self.log_err(f"{f.name}  roundtrip mismatch"); failed += 1
@@ -706,7 +815,7 @@ class BintxtApp(tk.Tk):
     def _do_draft(self):
         cfg = _cfg(); _ensure_dirs(cfg)
         in_dir, out_dir = Path(cfg["input_dir"]), Path(cfg["output_dir"])
-        endian, ws = cfg["endian"], cfg["word_sizes"]
+        endian, ws, ab = cfg["endian"], cfg["word_sizes"], cfg.get("address_bits", 32)
         tmp = tempfile.mkdtemp()
 
         bins = sorted(in_dir.glob("*.bin"))
@@ -722,7 +831,7 @@ class BintxtApp(tk.Tk):
             dst  = out_dir / f"__DRAFT_{stem}.txt"
             self.log_info(f"BIN  {f.name}  -->  {dst.name}")
             try:
-                bin_to_txt(str(f), str(dst), endian, ws)
+                bin_to_txt(str(f), str(dst), endian, ws, ab)
                 ok, h_orig, h_rt = verify_bin_to_txt(str(f), str(dst), endian, ws, tmp)
                 self.log_ok("Roundtrip verified") if ok else self.log_err("Roundtrip failed")
             except Exception as e:
@@ -747,7 +856,7 @@ class BintxtApp(tk.Tk):
     def _do_apply(self):
         cfg = _cfg(); _ensure_dirs(cfg)
         out_dir = Path(cfg["output_dir"])
-        endian, ws = cfg["endian"], cfg["word_sizes"]
+        endian, ws, ab = cfg["endian"], cfg["word_sizes"], cfg.get("address_bits", 32)
         tmp = tempfile.mkdtemp()
 
         drafts = sorted(out_dir.glob("__DRAFT_*.txt"))
@@ -779,7 +888,7 @@ class BintxtApp(tk.Tk):
     def _do_compare(self):
         cfg = _cfg(); _ensure_dirs(cfg)
         in_dir, out_dir = Path(cfg["input_dir"]), Path(cfg["output_dir"])
-        endian, ws = cfg["endian"], cfg["word_sizes"]
+        endian, ws, ab = cfg["endian"], cfg["word_sizes"], cfg.get("address_bits", 32)
         tmp = tempfile.mkdtemp()
 
         files = sorted(f for f in in_dir.iterdir() if f.suffix.lower() in (".bin", ".txt"))
@@ -867,7 +976,7 @@ _PREVIEW_DATA = bytes([
     0x10, 0x20, 0x30, 0x40,  0x50, 0x60, 0x70, 0x80,
 ])
 
-def _build_preview(word_sizes, endian):
+def _build_preview(word_sizes, endian, address_bits=32):
     """Generate a few sample hex rows from _PREVIEW_DATA using given config."""
     try:
         ws   = [int(x) for x in word_sizes if str(x).strip()]
@@ -875,12 +984,13 @@ def _build_preview(word_sizes, endian):
             return "  (invalid word size — must be 1, 2, 4, or 8)"
         if not (1 <= len(ws) <= 6):
             return "  (1–6 words per row)"
-        stride = sum(ws)
-        data   = _PREVIEW_DATA
-        lines  = []
-        offset = 0
+        stride  = sum(ws)
+        addr_w  = address_bits // 4
+        data    = _PREVIEW_DATA
+        lines   = []
+        offset  = 0
         while offset < len(data) and len(lines) < 6:
-            parts = [f"{offset:08x}"]
+            parts = [f"{offset:0{addr_w}x}"]
             cur   = offset
             for w in ws:
                 chunk = data[cur:cur+w] if cur+w <= len(data) else data[cur:] + b"\x00"*(w-(len(data)-cur))
@@ -889,7 +999,7 @@ def _build_preview(word_sizes, endian):
                 cur  += w
             lines.append("  " + "  ".join(parts))
             offset += stride
-        lines.append(f"  {offset:08x}")
+        lines.append(f"  {offset:0{addr_w}x}")
         return "\n".join(lines)
     except Exception as e:
         return f"  (error: {e})"
@@ -909,12 +1019,13 @@ class SettingsDialog(tk.Toplevel):
         # ── State vars ────────────────────────────────────────────────────────
         self._endian      = tk.StringVar(value=cfg["endian"])
         self._word_sizes  = tk.StringVar(value=" ".join(str(w) for w in cfg["word_sizes"]))
+        self._addr_bits   = tk.StringVar(value=str(cfg.get("address_bits", 32)))
         self._input_dir   = tk.StringVar(value=cfg["input_dir"])
         self._output_dir  = tk.StringVar(value=cfg["output_dir"])
         self._report_dir  = tk.StringVar(value=cfg["report_dir"])
 
         # Trigger preview rebuild on any change
-        for v in (self._endian, self._word_sizes):
+        for v in (self._endian, self._word_sizes, self._addr_bits):
             v.trace_add("write", lambda *_: self._update_preview())
 
         self._build()
@@ -991,6 +1102,22 @@ class SettingsDialog(tk.Toplevel):
             r = tk.Frame(parent, bg=BG)
             r.pack(fill="x", padx=20, pady=2)
             tk.Radiobutton(r, text=lbl, variable=self._endian, value=val,
+                           bg=BG, fg=FG, selectcolor=SURFACE2,
+                           activebackground=BG, activeforeground=FG,
+                           font=UI_S).pack(side="left")
+            tk.Label(r, text=f"  —  {sub}", bg=BG, fg=FG_DIM,
+                     font=UI_S).pack(side="left")
+
+        # Address width — stacked radio
+        tk.Label(parent, text="Address width", bg=BG, fg=FG_MED, font=UI_S,
+                 anchor="w").pack(anchor="w", padx=16, pady=(12, 4))
+        for val, lbl, sub in (
+            ("32", "32-bit", "8 hex digits  —  up to 4 GB  (standard config files)"),
+            ("64", "64-bit", "16 hex digits  —  up to 16 EB  (large firmware / ELF)"),
+        ):
+            r = tk.Frame(parent, bg=BG)
+            r.pack(fill="x", padx=20, pady=2)
+            tk.Radiobutton(r, text=lbl, variable=self._addr_bits, value=val,
                            bg=BG, fg=FG, selectcolor=SURFACE2,
                            activebackground=BG, activeforeground=FG,
                            font=UI_S).pack(side="left")
@@ -1111,7 +1238,8 @@ class SettingsDialog(tk.Toplevel):
 
         preview = _build_preview(
             [x for x in self._word_sizes.get().split() if x],
-            self._endian.get()
+            self._endian.get(),
+            int(self._addr_bits.get()) if self._addr_bits.get() in ("32","64") else 32,
         )
 
         self._preview_text.configure(state="normal")
@@ -1163,6 +1291,8 @@ class SettingsDialog(tk.Toplevel):
             try:   return str(Path(p).relative_to(REPO_ROOT))
             except: return p
 
+        addr_bits = int(self._addr_bits.get()) if self._addr_bits.get() in ("32","64") else 32
+
         content = (
             f'#!/usr/bin/env bash\n'
             f'# bintxt_tool configuration — edited via UI settings\n\n'
@@ -1170,6 +1300,8 @@ class SettingsDialog(tk.Toplevel):
             f'# Word sizes per row (bytes each — must be 1, 2, 4, or 8)\n'
             f'# Examples: (4)  (4 4)  (4 2 1)  (2 2 2 2)\n'
             f'WORD_SIZES=({" ".join(str(w) for w in ws)})\n\n'
+            f'# Address field width in bits (32 = 8 hex digits, 64 = 16 hex digits)\n'
+            f'ADDRESS_BITS={addr_bits}\n\n'
             f'INPUT_DIR="{_rel(self._input_dir.get())}"\n'
             f'OUTPUT_DIR="{_rel(self._output_dir.get())}"\n'
             f'REPORT_DIR="{_rel(self._report_dir.get())}"\n'

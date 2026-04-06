@@ -14,6 +14,7 @@ import sys
 DEFAULT_CONFIG = {
     "endian": "little",
     "word_sizes": [4],
+    "address_bits": 32,
     "input_dir": "input",
     "output_dir": "output",
     "report_dir": "output/reports",
@@ -48,6 +49,11 @@ def load(repo_root: str) -> dict:
         m = re.search(r'^\s*WORD_SIZE\s*=\s*["\']?(\d+)["\']?', text, re.MULTILINE)
         if m:
             cfg["word_sizes"] = [int(m.group(1))]
+
+    # Address bits
+    m = re.search(r'^\s*ADDRESS_BITS\s*=\s*["\']?(\d+)["\']?', text, re.MULTILINE)
+    if m:
+        cfg["address_bits"] = int(m.group(1))
 
     # Dirs
     for key, var in [("input_dir", "INPUT_DIR"), ("output_dir", "OUTPUT_DIR"), ("report_dir", "REPORT_DIR")]:
