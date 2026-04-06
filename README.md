@@ -20,9 +20,11 @@ python3 ui/app.py
 ```bash
 pip install pyinstaller
 
-./build.sh          # Linux / macOS  →  dist/bintxt_tool
-build.bat           # Windows        →  dist\bintxt_tool.exe
+./build.sh          # Linux / macOS  →  ./bintxt_tool    (repo root)
+build.bat           # Windows        →  bintxt_tool.exe  (repo root)
 ```
+
+The executable lands in the **repo root** and must be run from there — it finds `cfg\`, `input\`, and `output\` relative to itself.
 
 The executable bundles Python and all dependencies — nothing to install on the target machine.
 

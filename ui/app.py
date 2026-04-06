@@ -16,7 +16,13 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# When frozen by PyInstaller, __file__ resolves into the temp _MEIPASS dir.
+# REPO_ROOT must point to the exe's own directory so cfg/, input/, output/
+# are found next to the executable (i.e. the cloned repo root).
+if getattr(sys, "frozen", False):
+    REPO_ROOT = Path(sys.executable).resolve().parent
+else:
+    REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ─── Version ──────────────────────────────────────────────────────────────────
 UI_VERSION  = "v1.0.0"   # update on UI releases only
@@ -24,11 +30,16 @@ CLI_VERSION = "v1.4.1"   # update when shipping a new CLI core tag
 
 
 def _asset_path(name: str) -> Path:
-    """Resolve a ui/assets/<name> path — works both from source and PyInstaller frozen."""
+    """Resolve a ui/assets/<name> path.
+    Bundled read-only assets (icons) come from _MEIPASS when frozen.
+    User data (cfg, input, output) always resolves via REPO_ROOT.
+    """
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "ui" / "assets" / name
     return Path(__file__).resolve().parent / "assets" / name
-sys.path.insert(0, str(REPO_ROOT))
+
+
+sys.path.insert(0, str(REPO_ROOT) if not getattr(sys, "frozen", False) else str(Path(sys._MEIPASS)))
 
 from core.config import load as load_config, absdirs
 from core.convert import (

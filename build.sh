@@ -45,8 +45,10 @@ pyinstaller \
   --add-data "cfg:cfg" \
   --add-data "ui/assets:ui/assets" \
   --paths "." \
+  --distpath "." \
   ui/app.py
 
 echo
 echo "=== Build complete ==="
-echo "    Output: dist/bintxt_tool"
+echo "    Output: ./bintxt_tool  (in repo root)"
+echo "    Run it from this folder so it finds cfg/, input/, output/"
