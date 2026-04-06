@@ -17,6 +17,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _asset_path(name: str) -> Path:
+    """Resolve a ui/assets/<name> path — works both from source and PyInstaller frozen."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "ui" / "assets" / name
+    return Path(__file__).resolve().parent / "assets" / name
 sys.path.insert(0, str(REPO_ROOT))
 
 from core.config import load as load_config, absdirs
@@ -96,11 +103,10 @@ class BintxtApp(tk.Tk):
         # App icon — resolves relative to this file so it works both
         # when running from source and when frozen by PyInstaller
         try:
-            _icon_dir = Path(__file__).parent / "assets"
             if platform.system() == "Windows":
-                self.iconbitmap(str(_icon_dir / "icon.ico"))
+                self.iconbitmap(str(_asset_path("icon.ico")))
             else:
-                _img = tk.PhotoImage(file=str(_icon_dir / "icon_1024.png"))
+                _img = tk.PhotoImage(file=str(_asset_path("icon_1024.png")))
                 self.iconphoto(True, _img)
         except Exception:
             pass  # no icon is fine
@@ -164,6 +170,16 @@ class BintxtApp(tk.Tk):
         bar = tk.Frame(self, bg=SURFACE2, height=42)
         bar.pack(fill="x")
         bar.pack_propagate(False)
+
+        # Logo — upper left
+        try:
+            self._toolbar_logo = tk.PhotoImage(file=str(_asset_path("icon_32.png")))
+            tk.Label(bar, image=self._toolbar_logo, bg=SURFACE2).pack(
+                side="left", padx=(8, 4), pady=5)
+        except Exception:
+            pass
+
+        _border_v(bar, thick=1, color=BORDER_S).pack(side="left", fill="y", padx=(0, 6), pady=8)
 
         # Left: action buttons
         for label, cmd, primary in [

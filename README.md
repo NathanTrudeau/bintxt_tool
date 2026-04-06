@@ -26,6 +26,8 @@ build.bat           # Windows        →  dist\bintxt_tool.exe
 
 The executable bundles Python and all dependencies — nothing to install on the target machine.
 
+> **Windows build tip:** if `build.bat` fails or the icon doesn't appear, run `pip install --upgrade pyinstaller`, then fully close and reopen your terminal / VS Code before re-running `build.bat`.
+
 > **macOS icon:** generate `ui/assets/icon.icns` with `iconutil -c icns /tmp/bintxt.iconset` on a Mac before building for the icon to show correctly.
 
 ---
