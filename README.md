@@ -102,12 +102,13 @@ Fingerprints every file in `input/` by its **normalized binary content**, then g
 
 ## Configuration
 
-Edit `config.sh` before running — no flags needed:
+Edit `cfg/config.sh` before running — no flags needed:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `ENDIAN` | `little` | `little` (x86/ARM) or `big` (MIPS/PowerPC) |
 | `WORD_SIZES` | `(4)` | Bytes per word, 1–6 words per row (see below) |
+| `ADDRESS_BITS` | `32` | Address width: `32` (8 hex digits) or `64` (16 hex digits) |
 | `INPUT_DIR` | `input` | Folder to scan |
 | `OUTPUT_DIR` | `output` | Folder for converted files |
 | `REPORT_DIR` | `output/reports` | Folder for reports |
@@ -118,6 +119,12 @@ WORD_SIZES=(4)        # one 32-bit word per row       → 00000000 deadbeef
 WORD_SIZES=(4 4)      # two 32-bit words per row       → 00000000 deadbeef cafebabe
 WORD_SIZES=(4 2 1)    # 32-bit + 16-bit + 8-bit        → 00000000 deadbeef cafe ff
 WORD_SIZES=(2 2 2 2)  # four 16-bit words per row      → 00000000 dead beef cafe babe
+```
+
+**`ADDRESS_BITS` example:**
+```bash
+ADDRESS_BITS=32   # default → 00000000 deadbeef
+ADDRESS_BITS=64   #         → 0000000000000000 deadbeef
 ```
 
 Config is the source of truth. All files — `.bin` and `.txt` — are validated against it.
@@ -137,7 +144,7 @@ Each row: `ADDRESS  WORD1  [WORD2  [WORD3 ...]]`
 00000080
 ```
 
-- **Address** — 8-digit hex, increments by `sum(WORD_SIZES)` per row
+- **Address** — hex, width = `ADDRESS_BITS / 4` digits (8 for 32-bit, 16 for 64-bit), increments by `sum(WORD_SIZES)` per row
 - **Values** — one hex field per entry in `WORD_SIZES`, width = `word_size × 2` digits
 - **Last line** — address only, marks end of file
 
@@ -159,6 +166,7 @@ Each row: `ADDRESS  WORD1  [WORD2  [WORD3 ...]]`
 
 | Branch | Contents |
 |--------|---------|
-| `main` | Core tool — stable, single example pair |
-| `seeded_testing` | Extra example files for validation |
-| `ui` | Optional drag-drop web UI (in development) |
+| `main` | Core CLI tool — stable, single example pair |
+| `cli_testing` | Seeded with extra example files for validation |
+| `ui` | tkinter desktop UI (development) |
+| `ui_testing` | Seeded mirror of `ui` for local testing |
