@@ -29,6 +29,8 @@ if [[ -z "${WORD_SIZES[*]:-}" && -n "${WORD_SIZE:-}" ]]; then
   WORD_SIZES=("$WORD_SIZE")
 fi
 
+ADDRESS_BITS="${ADDRESS_BITS:-32}"
+
 INPUT_DIR="$REPO_DIR/$INPUT_DIR"
 OUTPUT_DIR="$REPO_DIR/$OUTPUT_DIR"
 REPORT_DIR="$REPO_DIR/$REPORT_DIR"
@@ -83,13 +85,13 @@ check_deps() {
 
 # ─── Wrappers around core/convert.py ─────────────────────────────────────────
 
-bin_to_txt()          { python3 "$CORE" bin_to_txt  "$1" "$2" "$ENDIAN" "${WORD_SIZES[@]}"; }
+bin_to_txt()          { python3 "$CORE" bin_to_txt  "$1" "$2" "$ENDIAN" "$ADDRESS_BITS" "${WORD_SIZES[@]}"; }
 txt_to_bin()          { python3 "$CORE" txt_to_bin  "$1" "$2" "$ENDIAN" "${WORD_SIZES[@]}"; }
 validate_txt()        { python3 "$CORE" validate     "$1" "$ENDIAN" "${WORD_SIZES[@]}"; }
-normalize_txt()       { python3 "$CORE" normalize    "$1" "$2" "$ENDIAN" "${WORD_SIZES[@]}"; }
+normalize_txt()       { python3 "$CORE" normalize    "$1" "$2" "$ENDIAN" "$ADDRESS_BITS" "${WORD_SIZES[@]}"; }
 sha256()              { python3 "$CORE" sha256       "$1"; }
-verify_bin_roundtrip(){ python3 "$CORE" verify_b2t   "$1" "$2" "$TEMP_DIR" "$ENDIAN" "${WORD_SIZES[@]}"; }
-verify_txt_roundtrip(){ python3 "$CORE" verify_t2b   "$1" "$2" "$TEMP_DIR" "$ENDIAN" "${WORD_SIZES[@]}"; }
+verify_bin_roundtrip(){ python3 "$CORE" verify_b2t   "$1" "$2" "$TEMP_DIR" "$ENDIAN" "$ADDRESS_BITS" "${WORD_SIZES[@]}"; }
+verify_txt_roundtrip(){ python3 "$CORE" verify_t2b   "$1" "$2" "$TEMP_DIR" "$ENDIAN" "$ADDRESS_BITS" "${WORD_SIZES[@]}"; }
 
 # ─── Format report entry ─────────────────────────────────────────────────────
 
@@ -196,6 +198,7 @@ write_draft_report() {
     echo "  --------------------------------"
     echo "  Word layout : ${LAYOUT_LABEL}  (${#WORD_SIZES[@]} word(s), ${STRIDE}B stride)"
     echo "  Byte order  : $ENDIAN-endian"
+    echo "  Address bits: $ADDRESS_BITS-bit"
     echo "  Input dir   : $INPUT_DIR"
     echo "  Output dir  : $OUTPUT_DIR"
     echo
@@ -314,6 +317,7 @@ write_apply_report() {
     echo "  --------------------------------"
     echo "  Word layout : ${LAYOUT_LABEL}  (${#WORD_SIZES[@]} word(s), ${STRIDE}B stride)"
     echo "  Byte order  : $ENDIAN-endian"
+    echo "  Address bits: $ADDRESS_BITS-bit"
     echo "  Input       : output/__DRAFT_*.txt"
     echo "  Output dir  : $OUTPUT_DIR"
     echo "  Report dir  : $REPORT_DIR"

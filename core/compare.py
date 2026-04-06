@@ -2,7 +2,7 @@
 core/compare.py — Content fingerprinting and grouping logic for compare_inputs
 
 Importable by the UI; also callable as:
-    python3 core/compare.py fingerprint <path> <tmp_dir> <endian> <ws...>
+    python3 core/compare.py fingerprint <path> <tmp_dir> <endian> <addr_bits> <ws...>
     python3 core/compare.py group       <group_data_file> <hash1> ... ---PATHS--- <p1> ... ---TYPES--- <t1> ... ---ERRORS--- <e1> ...
 
 Exit codes: 0 = success/ok, 1 = error/unparseable.
@@ -22,7 +22,7 @@ from core.convert import bin_to_txt, normalize_for_compare, sha256_file
 # ─── Fingerprinting ───────────────────────────────────────────────────────────
 
 def fingerprint_file(
-    src: str, endian: str, word_sizes: list[int], tmp_dir: str = None
+    src: str, endian: str, word_sizes: list[int], tmp_dir: str = None, address_bits: int = 32
 ) -> tuple[str | None, str | None, str | None]:
     """Compute a content fingerprint (SHA-256 of normalized form) for src.
 
@@ -39,11 +39,11 @@ def fingerprint_file(
     try:
         if ext == "bin":
             extracted = os.path.join(td, f"extracted_{fname}.txt")
-            bin_to_txt(src, extracted, endian, word_sizes)
+            bin_to_txt(src, extracted, endian, word_sizes, address_bits)
             # Write normalized form
-            content = normalize_for_compare(extracted)
+            content = normalize_for_compare(extracted, address_bits)
         elif ext == "txt":
-            content = normalize_for_compare(src)
+            content = normalize_for_compare(src, address_bits)
         else:
             return (None, None, "Unsupported file type")
 
@@ -138,10 +138,11 @@ def _cli():
     cmd = sys.argv[1]
 
     if cmd == "fingerprint":
-        # fingerprint <path> <tmp_dir> <endian> <ws...>
+        # fingerprint <path> <tmp_dir> <endian> <addr_bits> <ws...>
         path, tmp_dir, endian = sys.argv[2], sys.argv[3], sys.argv[4]
-        ws = [int(x) for x in sys.argv[5:]]
-        h, norm_path, error = fingerprint_file(path, endian, ws, tmp_dir)
+        addr_bits = int(sys.argv[5])
+        ws = [int(x) for x in sys.argv[6:]]
+        h, norm_path, error = fingerprint_file(path, endian, ws, tmp_dir, addr_bits)
         if error:
             print(f"ERROR {error}")
             sys.exit(1)

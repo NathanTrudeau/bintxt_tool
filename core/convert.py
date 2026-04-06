@@ -4,14 +4,14 @@ core/convert.py — Binary ↔ text conversion logic for bintxt_tool
 All functions are importable (used by the UI).
 CLI dispatch at the bottom lets bash scripts call each function directly:
 
-    python3 core/convert.py bin_to_txt   <src> <dst> <endian> <ws...>
+    python3 core/convert.py bin_to_txt   <src> <dst> <endian> <addr_bits> <ws...>
     python3 core/convert.py txt_to_bin   <src> <dst> <endian> <ws...>
     python3 core/convert.py validate     <src> <endian> <ws...>
-    python3 core/convert.py normalize    <src> <dst> <endian> <ws...>
+    python3 core/convert.py normalize    <src> <dst> <endian> <addr_bits> <ws...>
     python3 core/convert.py sha256       <path>
-    python3 core/convert.py norm_compare <path>
-    python3 core/convert.py verify_b2t   <orig_bin> <gen_txt> <tmp_dir> <endian> <ws...>
-    python3 core/convert.py verify_t2b   <orig_txt> <gen_bin> <tmp_dir> <endian> <ws...>
+    python3 core/convert.py norm_compare <path> [addr_bits]
+    python3 core/convert.py verify_b2t   <orig_bin> <gen_txt> <tmp_dir> <endian> <addr_bits> <ws...>
+    python3 core/convert.py verify_t2b   <orig_txt> <gen_bin> <tmp_dir> <endian> <addr_bits> <ws...>
 
 Exit codes: 0 = success, 1 = error.
 """
@@ -181,8 +181,9 @@ def normalize_txt(src: str, dst: str, endian: str, word_sizes: list[int], addres
         f.write("\n".join(lines_out) + "\n")
 
 
-def normalize_for_compare(path: str) -> str:
+def normalize_for_compare(path: str, address_bits: int = 32) -> str:
     """Return normalized string representation of a .txt file for diffing."""
+    addr_w = address_bits // 4
     lines = []
     for raw in open(path):
         line = raw.strip().lower()
@@ -190,7 +191,7 @@ def normalize_for_compare(path: str) -> str:
             continue
         parts = line.split()
         try:
-            parts[0] = f"{int(parts[0], 16):08x}"
+            parts[0] = f"{int(parts[0], 16):0{addr_w}x}"
         except (ValueError, IndexError):
             pass
         lines.append(" ".join(parts))
@@ -210,7 +211,8 @@ def sha256_file(path: str) -> str:
 # ─── Roundtrip verification ───────────────────────────────────────────────────
 
 def verify_bin_to_txt(
-    orig_bin: str, gen_txt: str, endian: str, word_sizes: list[int], tmp_dir: str = None
+    orig_bin: str, gen_txt: str, endian: str, word_sizes: list[int], tmp_dir: str = None,
+    address_bits: int = 32,
 ) -> tuple[bool, str, str]:
     """Verify BIN→TXT by reconstructing binary and comparing hashes.
 
@@ -229,7 +231,8 @@ def verify_bin_to_txt(
 
 
 def verify_txt_to_bin(
-    orig_txt: str, gen_bin: str, endian: str, word_sizes: list[int], tmp_dir: str = None
+    orig_txt: str, gen_bin: str, endian: str, word_sizes: list[int], tmp_dir: str = None,
+    address_bits: int = 32,
 ) -> tuple[bool, str, str]:
     """Verify TXT→BIN by re-extracting and comparing normalized text.
 
@@ -237,11 +240,11 @@ def verify_txt_to_bin(
     """
     td = tmp_dir or tempfile.mkdtemp()
     rt_txt = os.path.join(td, "rt_" + os.path.basename(orig_txt))
-    bin_to_txt(gen_bin, rt_txt, endian, word_sizes)
+    bin_to_txt(gen_bin, rt_txt, endian, word_sizes, address_bits)
 
     h_bin = sha256_file(gen_bin)
-    norm_orig = normalize_for_compare(orig_txt)
-    norm_rt = normalize_for_compare(rt_txt)
+    norm_orig = normalize_for_compare(orig_txt, address_bits)
+    norm_rt = normalize_for_compare(rt_txt, address_bits)
 
     if norm_orig == norm_rt:
         return (True, h_bin, "")
@@ -270,9 +273,8 @@ def _cli():
     if cmd == "bin_to_txt":
         # bin_to_txt <src> <dst> <endian> <addr_bits> <ws...>
         src, dst, endian = sys.argv[2], sys.argv[3], sys.argv[4]
-        addr_bits = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] in ("32","64") else 32
-        ws_start  = 6 if addr_bits in (32,64) and len(sys.argv) > 5 and sys.argv[5] in ("32","64") else 5
-        ws = [int(x) for x in sys.argv[ws_start:]]
+        addr_bits = int(sys.argv[5])
+        ws = [int(x) for x in sys.argv[6:]]
         bin_to_txt(src, dst, endian, ws, addr_bits)
 
     elif cmd == "txt_to_bin":
@@ -298,32 +300,37 @@ def _cli():
                 print(i)
 
     elif cmd == "normalize":
-        # normalize <src> <dst> <endian> <ws...>
+        # normalize <src> <dst> <endian> <addr_bits> <ws...>
         src, dst, endian = sys.argv[2], sys.argv[3], sys.argv[4]
-        ws = [int(x) for x in sys.argv[5:]]
-        normalize_txt(src, dst, endian, ws)
+        addr_bits = int(sys.argv[5])
+        ws = [int(x) for x in sys.argv[6:]]
+        normalize_txt(src, dst, endian, ws, addr_bits)
 
     elif cmd == "sha256":
         # sha256 <path>
         print(sha256_file(sys.argv[2]))
 
     elif cmd == "norm_compare":
-        # norm_compare <path>  → prints normalized content to stdout
-        print(normalize_for_compare(sys.argv[2]))
+        # norm_compare <path> [addr_bits]  → prints normalized content to stdout
+        path = sys.argv[2]
+        addr_bits = int(sys.argv[3]) if len(sys.argv) > 3 else 32
+        print(normalize_for_compare(path, addr_bits))
 
     elif cmd == "verify_b2t":
-        # verify_b2t <orig_bin> <gen_txt> <tmp_dir> <endian> <ws...>
+        # verify_b2t <orig_bin> <gen_txt> <tmp_dir> <endian> <addr_bits> <ws...>
         orig_bin, gen_txt, tmp_dir, endian = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-        ws = [int(x) for x in sys.argv[6:]]
-        ok, h_orig, h_rt = verify_bin_to_txt(orig_bin, gen_txt, endian, ws, tmp_dir)
+        addr_bits = int(sys.argv[6])
+        ws = [int(x) for x in sys.argv[7:]]
+        ok, h_orig, h_rt = verify_bin_to_txt(orig_bin, gen_txt, endian, ws, tmp_dir, addr_bits)
         print(f"{h_orig} {h_rt}")
         sys.exit(0 if ok else 1)
 
     elif cmd == "verify_t2b":
-        # verify_t2b <orig_txt> <gen_bin> <tmp_dir> <endian> <ws...>
+        # verify_t2b <orig_txt> <gen_bin> <tmp_dir> <endian> <addr_bits> <ws...>
         orig_txt, gen_bin, tmp_dir, endian = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-        ws = [int(x) for x in sys.argv[6:]]
-        ok, h_bin, diff = verify_txt_to_bin(orig_txt, gen_bin, endian, ws, tmp_dir)
+        addr_bits = int(sys.argv[6])
+        ws = [int(x) for x in sys.argv[7:]]
+        ok, h_bin, diff = verify_txt_to_bin(orig_txt, gen_bin, endian, ws, tmp_dir, addr_bits)
         if ok:
             print(h_bin)
             sys.exit(0)
