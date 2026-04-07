@@ -25,7 +25,7 @@ else:
     REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ─── Version ──────────────────────────────────────────────────────────────────
-UI_VERSION  = "v1.0.0"   # update on UI releases only
+UI_VERSION  = "v1.0.1"   # update on UI releases only
 CLI_VERSION = "v1.4.1"   # update when shipping a new CLI core tag
 
 
@@ -66,6 +66,9 @@ GREEN    = "#4ec9b0"
 RED      = "#e05252"
 YELLOW   = "#d4a94a"
 CYAN     = "#9cdcfe"
+
+# How often to check input/ and output/ for external changes (ms)
+DIR_WATCH_MS = 200
 
 MONO   = ("Courier New", 10)
 MONO_S = ("Courier New", 9)
@@ -133,10 +136,12 @@ class BintxtApp(tk.Tk):
         self._input_files  = []
         self._output_files = []
         self._undo_stack   = []   # list of {"files": [(Path, bytes)], "desc": str}
+        self._last_fs_snap = None  # updated by _refresh_all — see _poll_dir_watch
 
         self._apply_scrollbar_style()
         self._build()
         self._refresh_all()
+        self.after(DIR_WATCH_MS, self._poll_dir_watch)
 
         self.update_idletasks()
         w, h = 1280, 780
@@ -509,9 +514,58 @@ class BintxtApp(tk.Tk):
                 self.log_info(f"Added: {src.name}")
         self._refresh_all()
 
+    def _fs_snapshots(self):
+        """Tuple that changes when tracked .bin/.txt files appear, vanish, or are rewritten."""
+        cfg = _cfg()
+
+        def snap_input():
+            items = []
+            try:
+                for f in Path(cfg["input_dir"]).iterdir():
+                    if f.suffix.lower() not in (".bin", ".txt"):
+                        continue
+                    try:
+                        st = f.stat()
+                        items.append((f.name, st.st_mtime_ns, st.st_size))
+                    except OSError:
+                        pass
+            except OSError:
+                return ()
+            return tuple(sorted(items))
+
+        def snap_output():
+            items = []
+            try:
+                for f in Path(cfg["output_dir"]).iterdir():
+                    if not f.is_file():
+                        continue
+                    if f.suffix.lower() not in (".bin", ".txt"):
+                        continue
+                    try:
+                        st = f.stat()
+                        items.append((f.name, st.st_mtime_ns, st.st_size))
+                    except OSError:
+                        pass
+            except OSError:
+                return ()
+            return tuple(sorted(items))
+
+        return (snap_input(), snap_output())
+
+    def _poll_dir_watch(self):
+        if not self.winfo_exists():
+            return
+        try:
+            if self._fs_snapshots() != self._last_fs_snap:
+                self._refresh_all()
+        except Exception:
+            pass
+        self.after(DIR_WATCH_MS, self._poll_dir_watch)
+
     def _refresh_all(self):
-        self.after(0, self._refresh_input)
-        self.after(0, self._refresh_output)
+        self._refresh_input()
+        self._refresh_output()
+        self._last_fs_snap = self._fs_snapshots()
 
     def _refresh_input(self):
         cfg = _cfg()
