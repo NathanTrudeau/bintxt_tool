@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="cfg/logo.png" width="220" alt="bintxt_tool logo">
+</p>
+
 # bintxt_tool
 
 Convert, edit, and verify binary configuration files using human-readable hex text dumps.
@@ -6,37 +10,7 @@ Built for teams that need to **read, diff, and version-control binary files** wi
 
 ---
 
-## Desktop UI
-
-A standalone tkinter desktop app — no browser, no install, pure Python stdlib.
-
-**Run from source:**
-```bash
-cd bintxt_tool
-python3 ui/app.py
-```
-
-**Build a standalone executable:**
-```bash
-pip install --upgrade pyinstaller
-
-./build.sh          # Linux / macOS  →  ./bintxt_tool_v1-0-0    (repo root)
-build.bat           # Windows        →  bintxt_tool_v1-0-0.exe  (repo root)
-```
-
-The executable lands in the **repo root** and must be run from there — it finds `cfg\`, `input\`, and `output\` relative to itself.
-
-The executable bundles Python and all dependencies — nothing to install on the target machine.
-
-> **Windows build tip:** if `build.bat` fails or the icon doesn't appear, run `pip install --upgrade pyinstaller`, then fully close and reopen your terminal / VS Code before re-running `build.bat`.
-
-> **macOS icon:** generate `ui/assets/icon.icns` with `iconutil -c icns /tmp/bintxt.iconset` on a Mac before building for the icon to show correctly.
-
----
-
 ## Three Scripts
-
-The UI wraps all three CLI scripts. You can also run them directly from bash.
 
 | Script | Purpose |
 |--------|---------|
@@ -49,14 +23,11 @@ The UI wraps all three CLI scripts. You can also run them directly from bash.
 ## Quick Start
 
 ```bash
-git clone -b ui https://github.com/NathanTrudeau/bintxt_tool.git
+git clone https://github.com/NathanTrudeau/bintxt_tool.git
 cd bintxt_tool
 
-# Run the UI
-python3 ui/app.py
-
-# Or use scripts directly — edit cfg/config.sh first if needed
-./scripts/convert_inputs.sh
+# Edit cfg/config.sh to match your binary format (optional — defaults work for most cases)
+# Drop files into input/ and run the appropriate script
 ```
 
 ---
@@ -130,7 +101,7 @@ Fingerprints every file in `input/` by **normalized binary content**, groups fil
 
 ## Configuration
 
-Edit `cfg/config.sh` — no flags needed at runtime. The UI settings panel writes this file for you.
+Edit `cfg/config.sh` — no flags needed at runtime:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -180,10 +151,10 @@ Each row: `ADDRESS  WORD1  [WORD2  ...]`
 
 | Tool | Notes |
 |------|-------|
-| `bash` 4.0+ | macOS/Linux native; Windows requires Git Bash or WSL (scripts only) |
-| `python3` | All conversion, validation, and hashing — also runs the UI |
+| `bash` 4.0+ | macOS/Linux native; Windows requires Git Bash or WSL |
+| `python3` | All conversion, validation, and hashing |
 
-> **Windows users:** the built `.exe` needs nothing extra. For scripts, use **Git Bash** or **WSL**.
+> **Windows users:** open **Git Bash** or **WSL**, `cd` to the repo, and run scripts from there.
 
 ---
 
@@ -192,6 +163,6 @@ Each row: `ADDRESS  WORD1  [WORD2  ...]`
 | Branch | Contents |
 |--------|---------|
 | `main` | Core CLI tool — stable |
-| `cli_testing` | Seeded with example files for CLI validation |
-| `ui` | This branch — desktop UI + build scripts |
+| `cli_testing` | Seeded with example files for validation |
+| `ui` | Desktop UI (tkinter) + build scripts — see that branch's README |
 | `ui_testing` | Seeded mirror of `ui` for local testing |
