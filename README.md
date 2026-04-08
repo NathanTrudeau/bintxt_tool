@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="cfg/logo.png" width="220" alt="bintxt_tool logo">
+</p>
+
 # bintxt_tool
 
 Convert, edit, and verify binary configuration files using human-readable hex text dumps.
