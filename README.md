@@ -5,19 +5,26 @@
 </p>
 
 <p align="center">
-Convert, edit, and verify binary configuration files using human-readable hex text dumps.<br>
-Built for teams that need to <strong>read, diff, and version-control binary files</strong> without specialized tooling.
+  <em>An interactive binary file explorer and conversion toolkit.</em>
+</p>
+
+<p align="center">
+Pop open a <code>.bin</code>, read it as hex text, edit it, convert it back — or compare a folder full of configs to find which ones are actually identical under the hood.<br><br>
+bintxt_tool is hands-on. Run it when you need to <strong>understand, edit, or audit</strong> a binary file.<br>
+If you need a <strong>automated pack/verify pipeline</strong> that runs on every commit, see <a href="https://github.com/NathanTrudeau/bintxt">bintxt</a>.
 </p>
 
 ---
 
 ## Three Scripts
 
-| Script | Purpose |
-|--------|---------|
-| `convert_inputs.sh` | Convert `.bin` ↔ `.txt` — no review, just go |
-| `edit_inputs.sh` | Draft-first workflow — review before writing binary |
-| `compare_inputs.sh` | Fingerprint any mix of `.bin`/`.txt` files, group identical content |
+Pick the one that fits what you're doing right now:
+
+| Script | When to use it |
+|--------|----------------|
+| `convert_inputs.sh` | You just want it converted — no prompts, both directions, done |
+| `edit_inputs.sh` | You want to review the hex text before anything gets written back to binary |
+| `compare_inputs.sh` | You have a folder of configs and want to know which ones are actually the same data |
 
 ---
 
@@ -27,8 +34,9 @@ Built for teams that need to <strong>read, diff, and version-control binary file
 git clone https://github.com/NathanTrudeau/bintxt_tool.git
 cd bintxt_tool
 
-# Edit cfg/config.sh to match your binary format (optional — defaults work for most cases)
-# Drop files into input/ and run the appropriate script
+# Drop .bin or .txt files into input/
+# Edit cfg/config.sh if your format differs from the defaults
+# Pick a script and run it
 ```
 
 ---
