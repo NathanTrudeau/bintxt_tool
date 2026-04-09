@@ -1,12 +1,13 @@
+<h1 align="center">bintxt_tool</h1>
+
 <p align="center">
-  <img src="cfg/logo.png" width="220" alt="bintxt_tool logo">
+  <img src="cfg/logo.png" width="340" alt="bintxt_tool logo">
 </p>
 
-# bintxt_tool
-
-Convert, edit, and verify binary configuration files using human-readable hex text dumps.
-
-Built for teams that need to **read, diff, and version-control binary files** without specialized tooling.
+<p align="center">
+Convert, edit, and verify binary configuration files using human-readable hex text dumps.<br>
+Built for teams that need to <strong>read, diff, and version-control binary files</strong> without specialized tooling.
+</p>
 
 ---
 
